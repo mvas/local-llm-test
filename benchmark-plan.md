@@ -22,9 +22,9 @@ The plan is split into a fast first pass and a deeper evaluation pass.
 
 Do not use one benchmark for everything. Separate evaluation into:
 
-- raw model quality
-- coding quality
-- agent quality
+- raw model quality (reasoning, knowledge, instruction following)
+- coding quality (generation and editing)
+- tool calling quality
 - inference speed
 
 A model can score well on static QA benchmarks and still be too slow for agent loops. A smaller model can score slightly worse but deliver a better real-world experience because it is much faster and more responsive.
@@ -48,15 +48,13 @@ Use these tools as the default benchmark stack:
   - For local inference and raw speed tests
   - Use `llama-bench` for throughput benchmarking
 - `lm-evaluation-harness`
-  - For general-purpose quality benchmarks
+  - For general-purpose quality benchmarks (`GSM8K`, `MMLU`, `IFEval`)
 - `EvalPlus`
-  - For coding benchmarks with stronger tests than plain HumanEval
-- `SWE-bench Verified`
-  - For coding-agent evaluation
-- Optional: `Terminal-Bench`
-  - For terminal-oriented agents
-- Optional: `GAIA`
-  - For general-purpose tool-using agents
+  - For coding benchmarks with stronger tests than plain HumanEval (`HumanEval+`, `MBPP+`)
+- `Aider`
+  - For code editing evaluation across multiple languages
+- `BFCL`
+  - For tool/function calling evaluation
 
 ## Runtime Recommendation
 
@@ -207,27 +205,23 @@ Primary outcome:
 
 - rule out models that are too slow before running heavier quality suites
 
-### Step 2: Small general-quality suite
+### Step 2: General-quality suite
 
-Run `lm-evaluation-harness` on a compact task set:
+Run `lm-evaluation-harness` on a focused task set:
 
-- `hellaswag`
-- `arc_challenge`
-- `winogrande`
 - `gsm8k`
+- `mmlu`
 - `ifeval`
 
 Why this set:
 
-- `HellaSwag`: common-sense completion
-- `ARC-Challenge`: harder multiple-choice reasoning
-- `Winogrande`: pronoun/common-sense reasoning
-- `GSM8K`: math and chain-of-thought-adjacent reasoning
-- `IFEval`: instruction following
+- `GSM8K`: math and chain-of-thought reasoning, still discriminative at local model sizes
+- `MMLU`: broad knowledge coverage, the standard knowledge benchmark
+- `IFEval`: instruction following, directly relevant to assistant use
 
-If runtime is tight, use a small sample count first.
+These three benchmarks cover reasoning, knowledge, and instruction following. Older benchmarks like `HellaSwag` and `Winogrande` are largely saturated by modern instruction-tuned models at 7B+ and no longer discriminate well between candidates.
 
-### Step 3: Small coding suite
+### Step 3: Coding suite
 
 Run:
 
@@ -238,7 +232,32 @@ Primary outcome:
 
 - identify which model is best at code generation under local constraints
 
-### Step 4: Manual prompt smoke test
+### Step 4: Code editing with Aider
+
+Run the `Aider` polyglot benchmark.
+
+This tests whether the model can correctly edit existing code given natural-language instructions, across multiple languages.
+
+Primary outcome:
+
+- identify which model works best as a practical coding assistant in an edit loop
+
+### Step 5: Tool calling with BFCL
+
+Run a subset of the `BFCL` (Berkeley Function Calling Leaderboard) benchmark.
+
+This tests whether the model can:
+
+- correctly format function call JSON
+- select the right function from a set
+- handle required vs optional parameters
+- deal with nested or complex argument schemas
+
+Primary outcome:
+
+- identify which model can reliably produce well-formed tool calls for agent workflows
+
+### Step 6: Manual prompt smoke test
 
 Use a small fixed prompt pack of 10 to 20 prompts that reflect real usage:
 
@@ -266,8 +285,8 @@ Goal: compare the top 2 or 3 model configurations in more realistic settings.
 
 Expand `lm-evaluation-harness` to include:
 
-- `mmlu` or `mmlu_pro`
-- `truthfulqa`
+- `mmlu_pro` if you want a harder knowledge benchmark than `mmlu`
+- `truthfulqa` for hallucination resistance
 - `bbh` subset if you want harder reasoning
 
 Do not run every possible benchmark. Use a curated set that covers:
@@ -286,40 +305,25 @@ Keep `EvalPlus`, then add one of:
 
 The private prompt pack is often more valuable than another public benchmark if your goal is real productivity.
 
-### Coding-agent evaluation
+### Code editing evaluation
 
-Run a small subset of `SWE-bench Verified`.
+Run the full `Aider` polyglot benchmark if Phase 1 used a subset, or run it against harder tasks.
 
-Suggested starting size:
+Use it to confirm:
 
-- `25` tasks for the first pass
-- `50` tasks if the setup is stable
+- can the model make correct edits across different languages?
+- does accuracy hold up on larger or more complex edit tasks?
+- how does it compare to Phase 1 results with more thorough testing?
 
-Do not start with the full benchmark. It is heavy, slow, and operationally expensive.
+### Tool calling evaluation
 
-Use it to answer:
+Run a broader set of `BFCL` tasks if Phase 1 used a subset.
 
-- can the model navigate a repo?
-- can it make correct edits?
-- can it satisfy tests?
-- can it recover from partial failure?
+Test additional scenarios:
 
-### Terminal-agent evaluation
-
-If terminal tool use matters, add `Terminal-Bench`.
-
-This is especially useful if you care about:
-
-- shell-heavy workflows
-- repo inspection
-- build and test loops
-- file manipulation through tools
-
-### General-purpose agent evaluation
-
-If you want broad tool-using behavior beyond coding, add `GAIA`.
-
-Treat `GAIA` as optional. It is useful, but less clean for strict local apples-to-apples measurement because tasks can depend on external retrieval and environment details.
+- multiple function calls in one turn
+- functions with complex nested schemas
+- irrelevant functions mixed in to test selection accuracy
 
 ## Suggested Prompt Packs
 
@@ -371,12 +375,11 @@ For each model configuration:
 
 1. Run `llama-bench`
 2. Run a fixed latency test on 5 to 10 prompts
-3. Run `lm-evaluation-harness` small suite
-4. Run `EvalPlus`
-5. Run prompt pack A and B
-6. If promising, run agent subset:
-   - `SWE-bench Verified`
-   - optional `Terminal-Bench`
+3. Run `lm-evaluation-harness` (`GSM8K`, `MMLU`, `IFEval`)
+4. Run `EvalPlus` (`HumanEval+`, `MBPP+`)
+5. Run `Aider` polyglot benchmark
+6. Run `BFCL` subset
+7. Run prompt pack A and B
 
 Stop early if a model is clearly too slow or weak.
 
@@ -389,7 +392,8 @@ Use these rules to choose winners.
 Optimize for:
 
 - good `IFEval`
-- good `MMLU` / `ARC`
+- good `MMLU`
+- good `GSM8K`
 - low latency
 - low hallucination rate in prompt pack A
 
@@ -398,6 +402,7 @@ Optimize for:
 Optimize for:
 
 - strongest `EvalPlus`
+- strongest `Aider` score
 - good code explanation and bug-fix performance in prompt pack B
 - acceptable latency for iterative prompting
 
@@ -405,8 +410,8 @@ Optimize for:
 
 Optimize for:
 
-- `SWE-bench Verified` subset success rate
-- median task completion time
+- `Aider` code editing success rate
+- `BFCL` tool calling accuracy
 - stability across multiple tasks
 
 The best coding assistant and the best coding agent may not be the same model.
@@ -448,11 +453,11 @@ Alternative set if you want reasoning emphasis:
 
 Do not spend early time on:
 
-- full `SWE-bench Verified`
 - too many quantization variants
 - too many runtimes at once
 - giant context experiments before baseline results exist
 - leaderboard chasing without testing your own prompt packs
+- saturated benchmarks like `HellaSwag` or `Winogrande` that no longer discriminate between modern models
 
 ## Deliverables
 
@@ -474,10 +479,11 @@ At the end of the benchmark, produce:
 If you want the leanest possible version, do this:
 
 1. Benchmark `3` models with `llama-bench`
-2. Run `hellaswag`, `arc_challenge`, `gsm8k`, `ifeval`
-3. Run `EvalPlus`
-4. Run a `25`-prompt private prompt pack
-5. Run `25` tasks from `SWE-bench Verified` on the top `2` models
+2. Run `gsm8k`, `mmlu`, `ifeval`
+3. Run `EvalPlus` (`HumanEval+`, `MBPP+`)
+4. Run `Aider` polyglot benchmark
+5. Run `BFCL` subset
+6. Run a `25`-prompt private prompt pack
 
 This is the highest-signal low-overhead version of the plan.
 
