@@ -10,16 +10,16 @@ hf download Qwen/Qwen2.5-Coder-14B-Instruct-GGUF qwen2.5-coder-14b-instruct-q4_k
 hf download Qwen/Qwen3-14B-GGUF --dry-run
 hf download Qwen/Qwen3-14B-GGUF Qwen3-14B-Q4_K_M.gguf --local-dir ~/models
 
-# Phi-4-reasoning-plus 14B
-# https://huggingface.co/microsoft/phi-4-gguf
-hf download microsoft/phi-4-gguf --dry-run
-hf download microsoft/phi-4-gguf phi-4-Q4_K.gguf --local-dir ~/models
-
 # DeepSeek-R1-Distill-Qwen-14B
 # https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF
 # https://huggingface.co/unsloth/DeepSeek-R1-Distill-Qwen-14B-GGUF
 hf download bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF --dry-run
 hf download bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf --local-dir ~/models
+
+# Phi-4-reasoning-plus 14B
+# https://huggingface.co/microsoft/phi-4-gguf
+hf download microsoft/phi-4-gguf --dry-run
+hf download microsoft/phi-4-gguf phi-4-Q4_K.gguf --local-dir ~/models
 
 # Gemma 3 12B
 # https://huggingface.co/unsloth/gemma-3-12b-it-GGUF
