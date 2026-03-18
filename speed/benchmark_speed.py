@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+from dataclasses import asdict, dataclass, fields
 import json
 import os
 import shutil
@@ -15,19 +16,19 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, TypedDict
 
 
 DEFAULTS = {
-    "ngl": 99,
-    "ctx": 8192,
-    "gen_tokens": 256,
-    "temp": 0.0,
-    "warmup": 1,
-    "repeats": 3,
-    "threads": None,
-    "bench_n_prompt": 512, # Number of input tokens to llama-bench
-    "bench_n_gen": 256, # Number of output tokens to llama-bench
+    "ngl": 99, # how many layers to offload to GPU (99 usually means “all possible”)
+    "ctx": 8192, # max context length
+    "lat_maxtokens": 256,
+    "lat_temp": 0.0,
+    "lat_warmup": 1,
+    "lat_repeats": 3,
+    "bench_threads": None, # Number of threads to use in llama-bench
+    "bench_input_tokens": 512, # Number of input tokens to llama-bench
+    "bench_output_tokens": 256, # Number of output tokens to llama-bench
     "bench_repetitions": 3, # Number of repetitions to run in llama-bench
     "server_host": "127.0.0.1",
     "server_port": 8081,
@@ -37,39 +38,70 @@ DEFAULTS = {
     "llama_server_bin": os.environ.get("LLAMA_SERVER_BIN", "llama-server"),
 }
 
-SUMMARY_FIELDS = [
-    "timestamp",
-    "model_path",
-    "model_name",
-    "ctx",
-    "ngl",
-    "gen_tokens",
-    "prompt_toks_per_s",
-    "decode_toks_per_s",
-    "ttft_short_ms_median",
-    "ttft_medium_ms_median",
-    "ttft_long_ms_median",
-    "e2e_short_ms_median",
-    "e2e_medium_ms_median",
-    "e2e_long_ms_median",
-    "status",
-    "error_note",
-]
 
-LATENCY_FIELDS = [
-    "timestamp",
-    "model_path",
-    "prompt_size",
-    "run_idx",
-    "ttft_ms",
-    "e2e_ms",
-    "output_tokens",
-    "status",
-]
+@dataclass(frozen=True)
+class SummaryRow:
+    timestamp: str
+    model_path: str
+    model_name: str
+    ctx: int
+    ngl: int
+    max_tokens: int
+    prompt_toks_per_s: str
+    decode_toks_per_s: str
+    ttft_short_ms_median: str
+    ttft_medium_ms_median: str
+    ttft_long_ms_median: str
+    e2e_short_ms_median: str
+    e2e_medium_ms_median: str
+    e2e_long_ms_median: str
+    status: str
+    error_note: str
+
+    @classmethod
+    def headers(cls) -> List[str]:
+        return [f.name for f in fields(cls)]
+
+    def to_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+SUMMARY_FIELDS = SummaryRow.headers()
+
+
+@dataclass(frozen=True)
+class LatencyRow:
+    timestamp: str
+    model_path: str
+    prompt_size: str
+    run_idx: int
+    ttft_ms: str
+    e2e_ms: str
+    output_tokens: int
+    status: str
+
+    @classmethod
+    def headers(cls) -> List[str]:
+        return [f.name for f in fields(cls)]
+
+    def to_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
+
+LATENCY_FIELDS = LatencyRow.headers()
 
 
 class BenchmarkError(RuntimeError):
     pass
+
+
+class LatencyResultRow(TypedDict):
+    prompt_size: str
+    run_idx: int
+    ttft_ms: float
+    e2e_ms: float
+    output_tokens: int
+    status: str
 
 
 def now_iso() -> str:
@@ -146,9 +178,9 @@ def run_llama_bench(
     model_path: str,
     model_raw_dir: Path,
     ngl: int,
-    threads: Optional[int],
-    bench_n_prompt: int,
-    bench_n_gen: int,
+    bench_threads: Optional[int],
+    bench_input_tokens: int,
+    bench_output_tokens: int,
     bench_repetitions: int,
 ) -> Tuple[float, float]:
     bench_jsonl = model_raw_dir / "bench.jsonl"
@@ -161,10 +193,10 @@ def run_llama_bench(
         model_path,
         # Number of input tokens to benchmark
         "-p",
-        str(bench_n_prompt),
+        str(bench_input_tokens),
         # Number of output tokens to benchmark
         "-n",
-        str(bench_n_gen),
+        str(bench_output_tokens),
         # how many layers to offload to GPU (99 usually means “all possible”)
         "-ngl",
         str(ngl),
@@ -175,8 +207,8 @@ def run_llama_bench(
         "-o",
         "jsonl",
     ]
-    if threads is not None:
-        cmd.extend(["-t", str(threads)])
+    if bench_threads is not None:
+        cmd.extend(["-t", str(bench_threads)])
 
     with bench_jsonl.open("w", encoding="utf-8") as out, bench_stderr.open("w", encoding="utf-8") as err:
         proc = subprocess.run(cmd, stdout=out, stderr=err, text=True)
@@ -217,7 +249,8 @@ def wait_for_health(host: str, port: int, timeout_s: int = 180) -> bool:
                 if resp.status == 200:
                     return True
         except Exception:
-            time.sleep(1)
+            pass
+        time.sleep(1)
     return False
 
 
@@ -225,15 +258,15 @@ def run_latency_once(
     host: str,
     port: int,
     prompt: str,
-    temp: float,
-    max_tokens: int,
+    lat_temp: float,
+    lat_maxtokens: int,
 ) -> Tuple[float, float, int]:
     url = f"http://{host}:{port}/v1/chat/completions"
     payload = {
         "model": "local",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": temp,
-        "max_tokens": max_tokens,
+        "temperature": lat_temp,
+        "max_tokens": lat_maxtokens,
         "stream": True,
     }
     req = urllib.request.Request(
@@ -285,25 +318,25 @@ def run_latency_suite(
     host: str,
     port: int,
     prompts: Dict[str, str],
-    warmup: int,
-    repeats: int,
-    temp: float,
-    gen_tokens: int,
-) -> Tuple[List[Dict[str, object]], Dict[str, Dict[str, float]]]:
-    rows: List[Dict[str, object]] = []
+    lat_warmup: int,
+    lat_repeats: int,
+    lat_temp: float,
+    lat_maxtokens: int,
+) -> Tuple[List[LatencyResultRow], Dict[str, Dict[str, float]]]:
+    rows: List[LatencyResultRow] = []
     medians: Dict[str, Dict[str, float]] = {}
 
     for prompt_size in ("short", "medium", "long"):
         prompt = prompts[prompt_size]
 
-        for _ in range(warmup):
-            run_latency_once(host, port, prompt, temp=temp, max_tokens=gen_tokens)
+        for _ in range(lat_warmup):
+            run_latency_once(host, port, prompt, lat_temp=lat_temp, lat_maxtokens=lat_maxtokens)
 
         ttfts: List[float] = []
         e2es: List[float] = []
-        for run_idx in range(1, repeats + 1):
+        for run_idx in range(1, lat_repeats + 1):
             ttft_ms, e2e_ms, output_tokens = run_latency_once(
-                host, port, prompt, temp=temp, max_tokens=gen_tokens
+                host, port, prompt, lat_temp=lat_temp, lat_maxtokens=lat_maxtokens
             )
             if ttft_ms >= 0:
                 ttfts.append(ttft_ms)
@@ -335,13 +368,13 @@ def write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str])
         f"models_count={len(resolved_models)}",
         f"ngl={args.ngl}",
         f"ctx={args.ctx}",
-        f"gen_tokens={args.gen_tokens}",
-        f"temp={args.temp}",
-        f"warmup={args.warmup}",
-        f"repeats={args.repeats}",
-        f"threads={args.threads if args.threads is not None else 'auto'}",
-        f"bench_n_prompt={args.bench_n_prompt}",
-        f"bench_n_gen={args.bench_n_gen}",
+        f"lat_maxtokens={args.lat_maxtokens}",
+        f"lat_temp={args.lat_temp}",
+        f"lat_warmup={args.lat_warmup}",
+        f"lat_repeats={args.lat_repeats}",
+        f"bench_threads={args.bench_threads if args.bench_threads is not None else 'auto'}",
+        f"bench_input_tokens={args.bench_input_tokens}",
+        f"bench_output_tokens={args.bench_output_tokens}",
         f"bench_repetitions={args.bench_repetitions}",
         f"llama_bench_bin={args.llama_bench_bin}",
         f"llama_server_bin={args.llama_server_bin}",
@@ -364,13 +397,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir-base", default=DEFAULTS["out_dir_base"])
     p.add_argument("--ngl", type=int, default=DEFAULTS["ngl"])
     p.add_argument("--ctx", type=int, default=DEFAULTS["ctx"])
-    p.add_argument("--gen-tokens", type=int, default=DEFAULTS["gen_tokens"])
-    p.add_argument("--temp", type=float, default=DEFAULTS["temp"])
-    p.add_argument("--warmup", type=int, default=DEFAULTS["warmup"])
-    p.add_argument("--repeats", type=int, default=DEFAULTS["repeats"])
-    p.add_argument("--threads", type=int, default=DEFAULTS["threads"])
-    p.add_argument("--bench-n-prompt", type=int, default=DEFAULTS["bench_n_prompt"])
-    p.add_argument("--bench-n-gen", type=int, default=DEFAULTS["bench_n_gen"])
+    p.add_argument("--lat-maxtokens", type=int, default=DEFAULTS["lat_maxtokens"])
+    p.add_argument("--lat_temp", type=float, default=DEFAULTS["lat_temp"])
+    p.add_argument("--lat_warmup", type=int, default=DEFAULTS["lat_warmup"])
+    p.add_argument("--lat_repeats", type=int, default=DEFAULTS["lat_repeats"])
+    p.add_argument("--bench-threads", type=int, default=DEFAULTS["bench_threads"])
+    p.add_argument("--bench-input-tokens", type=int, default=DEFAULTS["bench_input_tokens"])
+    p.add_argument("--bench-output-tokens", type=int, default=DEFAULTS["bench_output_tokens"])
     p.add_argument("--bench-repetitions", type=int, default=DEFAULTS["bench_repetitions"])
     p.add_argument("--server-host", default=DEFAULTS["server_host"])
     p.add_argument("--server-port", type=int, default=DEFAULTS["server_port"])
@@ -441,24 +474,24 @@ def main() -> int:
             append_csv_row(
                 summary_csv,
                 SUMMARY_FIELDS,
-                {
-                    "timestamp": ts_slug,
-                    "model_path": model_path,
-                    "model_name": model_slug,
-                    "ctx": args.ctx,
-                    "ngl": args.ngl,
-                    "gen_tokens": args.gen_tokens,
-                    "prompt_toks_per_s": "",
-                    "decode_toks_per_s": "",
-                    "ttft_short_ms_median": "",
-                    "ttft_medium_ms_median": "",
-                    "ttft_long_ms_median": "",
-                    "e2e_short_ms_median": "",
-                    "e2e_medium_ms_median": "",
-                    "e2e_long_ms_median": "",
-                    "status": "failed",
-                    "error_note": err,
-                },
+                SummaryRow(
+                    timestamp=ts_slug,
+                    model_path=model_path,
+                    model_name=model_slug,
+                    ctx=args.ctx,
+                    ngl=args.ngl,
+                    max_tokens=args.lat_maxtokens,
+                    prompt_toks_per_s="",
+                    decode_toks_per_s="",
+                    ttft_short_ms_median="",
+                    ttft_medium_ms_median="",
+                    ttft_long_ms_median="",
+                    e2e_short_ms_median="",
+                    e2e_medium_ms_median="",
+                    e2e_long_ms_median="",
+                    status="failed",
+                    error_note=err,
+                ).to_dict(),
             )
             print()
             continue
@@ -471,9 +504,9 @@ def main() -> int:
                 model_path,
                 model_raw_dir,
                 ngl=args.ngl,
-                threads=args.threads,
-                bench_n_prompt=args.bench_n_prompt,
-                bench_n_gen=args.bench_n_gen,
+                bench_threads=args.bench_threads,
+                bench_input_tokens=args.bench_input_tokens,
+                bench_output_tokens=args.bench_output_tokens,
                 bench_repetitions=args.bench_repetitions,
             )
 
@@ -493,8 +526,8 @@ def main() -> int:
                 "--port",
                 str(args.server_port),
             ]
-            if args.threads is not None:
-                server_cmd.extend(["-t", str(args.threads)])
+            if args.bench_threads is not None:
+                server_cmd.extend(["-t", str(args.bench_threads)])
 
             with server_log.open("w", encoding="utf-8") as logf:
                 server_proc = subprocess.Popen(server_cmd, stdout=logf, stderr=subprocess.STDOUT, text=True)
@@ -506,10 +539,10 @@ def main() -> int:
                 args.server_host,
                 args.server_port,
                 prompts,
-                warmup=args.warmup,
-                repeats=args.repeats,
-                temp=args.temp,
-                gen_tokens=args.gen_tokens,
+                lat_warmup=args.lat_warmup,
+                lat_repeats=args.lat_repeats,
+                lat_temp=args.lat_temp,
+                lat_maxtokens=args.lat_maxtokens,
             )
 
             (model_raw_dir / "latency_raw.json").write_text(
@@ -521,39 +554,39 @@ def main() -> int:
                 append_csv_row(
                     latency_csv,
                     LATENCY_FIELDS,
-                    {
-                        "timestamp": ts_slug,
-                        "model_path": model_path,
-                        "prompt_size": row["prompt_size"],
-                        "run_idx": row["run_idx"],
-                        "ttft_ms": f'{row["ttft_ms"]:.3f}',
-                        "e2e_ms": f'{row["e2e_ms"]:.3f}',
-                        "output_tokens": row["output_tokens"],
-                        "status": row["status"],
-                    },
+                    LatencyRow(
+                        timestamp=ts_slug,
+                        model_path=model_path,
+                        prompt_size=row["prompt_size"],
+                        run_idx=row["run_idx"],
+                        ttft_ms=f'{row["ttft_ms"]:.3f}',
+                        e2e_ms=f'{row["e2e_ms"]:.3f}',
+                        output_tokens=row["output_tokens"],
+                        status=row["status"],
+                    ).to_dict(),
                 )
 
             append_csv_row(
                 summary_csv,
                 SUMMARY_FIELDS,
-                {
-                    "timestamp": ts_slug,
-                    "model_path": model_path,
-                    "model_name": model_slug,
-                    "ctx": args.ctx,
-                    "ngl": args.ngl,
-                    "gen_tokens": args.gen_tokens,
-                    "prompt_toks_per_s": f"{prompt_toks:.6f}",
-                    "decode_toks_per_s": f"{decode_toks:.6f}",
-                    "ttft_short_ms_median": f'{medians["short"]["ttft_ms_median"]:.3f}',
-                    "ttft_medium_ms_median": f'{medians["medium"]["ttft_ms_median"]:.3f}',
-                    "ttft_long_ms_median": f'{medians["long"]["ttft_ms_median"]:.3f}',
-                    "e2e_short_ms_median": f'{medians["short"]["e2e_ms_median"]:.3f}',
-                    "e2e_medium_ms_median": f'{medians["medium"]["e2e_ms_median"]:.3f}',
-                    "e2e_long_ms_median": f'{medians["long"]["e2e_ms_median"]:.3f}',
-                    "status": "ok",
-                    "error_note": "",
-                },
+                SummaryRow(
+                    timestamp=ts_slug,
+                    model_path=model_path,
+                    model_name=model_slug,
+                    ctx=args.ctx,
+                    ngl=args.ngl,
+                    max_tokens=args.lat_maxtokens,
+                    prompt_toks_per_s=f"{prompt_toks:.6f}",
+                    decode_toks_per_s=f"{decode_toks:.6f}",
+                    ttft_short_ms_median=f'{medians["short"]["ttft_ms_median"]:.3f}',
+                    ttft_medium_ms_median=f'{medians["medium"]["ttft_ms_median"]:.3f}',
+                    ttft_long_ms_median=f'{medians["long"]["ttft_ms_median"]:.3f}',
+                    e2e_short_ms_median=f'{medians["short"]["e2e_ms_median"]:.3f}',
+                    e2e_medium_ms_median=f'{medians["medium"]["e2e_ms_median"]:.3f}',
+                    e2e_long_ms_median=f'{medians["long"]["e2e_ms_median"]:.3f}',
+                    status="ok",
+                    error_note="",
+                ).to_dict(),
             )
 
             ok_count += 1
@@ -563,24 +596,24 @@ def main() -> int:
             append_csv_row(
                 summary_csv,
                 SUMMARY_FIELDS,
-                {
-                    "timestamp": ts_slug,
-                    "model_path": model_path,
-                    "model_name": model_slug,
-                    "ctx": args.ctx,
-                    "ngl": args.ngl,
-                    "gen_tokens": args.gen_tokens,
-                    "prompt_toks_per_s": f"{prompt_toks:.6f}" if prompt_toks else "",
-                    "decode_toks_per_s": f"{decode_toks:.6f}" if decode_toks else "",
-                    "ttft_short_ms_median": "",
-                    "ttft_medium_ms_median": "",
-                    "ttft_long_ms_median": "",
-                    "e2e_short_ms_median": "",
-                    "e2e_medium_ms_median": "",
-                    "e2e_long_ms_median": "",
-                    "status": "failed",
-                    "error_note": str(exc),
-                },
+                SummaryRow(
+                    timestamp=ts_slug,
+                    model_path=model_path,
+                    model_name=model_slug,
+                    ctx=args.ctx,
+                    ngl=args.ngl,
+                    max_tokens=args.lat_maxtokens,
+                    prompt_toks_per_s=f"{prompt_toks:.6f}" if prompt_toks else "",
+                    decode_toks_per_s=f"{decode_toks:.6f}" if decode_toks else "",
+                    ttft_short_ms_median="",
+                    ttft_medium_ms_median="",
+                    ttft_long_ms_median="",
+                    e2e_short_ms_median="",
+                    e2e_medium_ms_median="",
+                    e2e_long_ms_median="",
+                    status="failed",
+                    error_note=str(exc),
+                ).to_dict(),
             )
             print(f"  - ERROR: {exc}")
         finally:
