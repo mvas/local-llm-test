@@ -72,56 +72,6 @@ Reasoning:
 - `MLX` is worth checking later because Apple Silicon performance can be very strong.
 - `Ollama` is convenient, but it adds another layer that can obscure exact runtime comparisons.
 
-## Models to Compare
-
-Use three model size classes. Compare one or two candidates per class.
-
-### Fast class
-
-Use for chat responsiveness and agent loops.
-
-Suggested range:
-
-- `7B`
-- `8B`
-
-Example candidates:
-
-- `Qwen2.5-Coder 7B`
-- `Qwen2.5 7B Instruct`
-- `Llama 3.1 8B Instruct`
-
-### Balanced class
-
-Likely best tradeoff on this machine.
-
-Suggested range:
-
-- `14B`
-- `16B`
-- `20B`
-
-Example candidates:
-
-- `Qwen2.5-Coder 14B`
-- `Qwen2.5 14B Instruct`
-- `DeepSeek-Coder v2 Lite`
-- `Mistral Small` class models if available in your preferred format
-
-### Strong class
-
-Use only if latency is still acceptable.
-
-Suggested range:
-
-- `32B`
-
-Example candidates:
-
-- `Qwen2.5-Coder 32B`
-- `QwQ 32B` for reasoning experiments
-
-Avoid making `70B` the center of the plan. It may run in aggressive quantization, but it is often too slow for coding-agent workflows on a laptop.
 
 ## Quantization Strategy
 
@@ -176,24 +126,9 @@ Record all results in one table or CSV.
 
 Goal: identify which models deserve deeper testing.
 
-Test 3 to 5 model configurations total.
-
-Recommended matrix:
-
-- 1 fast model
-- 2 balanced models
-- optional 1 strong model
-
-Example:
-
-- `Qwen2.5 7B Instruct`
-- `Qwen2.5-Coder 14B`
-- `Qwen2.5 14B Instruct`
-- `Qwen2.5-Coder 32B` if latency is acceptable
-
 ### Step 1: Raw speed with llama.cpp
 
-Run `llama-bench` for each model with the same settings.
+Run `llama-bench` for each model with the same settings. Rule out models that are too slow
 
 Capture:
 
@@ -201,187 +136,48 @@ Capture:
 - generation speed
 - batch sensitivity if you test it
 
-Primary outcome:
-
-- rule out models that are too slow before running heavier quality suites
 
 ### Step 2: General-quality suite
 
-Run `lm-evaluation-harness` on a focused task set:
+Run `lm-evaluation-harness`, using limited subset of examples, for limited task set:
 
-- `gsm8k`
-- `mmlu`
-- `ifeval`
+- `GSM8K`, math and chain-of-thought reasoning
+- `MMLU`, Log-likelihood, knowledge benchmark
+- `IFEval`, instruction following
 
-Why this set:
+Older benchmarks like `HellaSwag` and `Winogrande` are largely saturated by modern instruction-tuned models at 7B+ and no longer discriminate well between candidates.
 
-- `GSM8K`: math and chain-of-thought reasoning, still discriminative at local model sizes
-- `MMLU`: broad knowledge coverage, the standard knowledge benchmark
-- `IFEval`: instruction following, directly relevant to assistant use
 
-These three benchmarks cover reasoning, knowledge, and instruction following. Older benchmarks like `HellaSwag` and `Winogrande` are largely saturated by modern instruction-tuned models at 7B+ and no longer discriminate well between candidates.
+### Step 3: Specific tests
 
-### Step 3: Coding suite
+- `EvalPlus HumanEval+` - code generation
+- `Aider` subset, multi-turn code generation
+- `BFCL` subset for tool calling
 
-Run:
-
-- `EvalPlus HumanEval+`
-- `EvalPlus MBPP+`
-
-Primary outcome:
-
-- identify which model is best at code generation under local constraints
-
-### Step 4: Code editing with Aider
-
-Run the `Aider` polyglot benchmark.
-
-This tests whether the model can correctly edit existing code given natural-language instructions, across multiple languages.
-
-Primary outcome:
-
-- identify which model works best as a practical coding assistant in an edit loop
-
-### Step 5: Tool calling with BFCL
-
-Run a subset of the `BFCL` (Berkeley Function Calling Leaderboard) benchmark.
-
-This tests whether the model can:
-
-- correctly format function call JSON
-- select the right function from a set
-- handle required vs optional parameters
-- deal with nested or complex argument schemas
-
-Primary outcome:
-
-- identify which model can reliably produce well-formed tool calls for agent workflows
-
-### Step 6: Manual prompt smoke test
-
-Use a small fixed prompt pack of 10 to 20 prompts that reflect real usage:
-
-- explain an unfamiliar code snippet
-- write a small utility function
-- refactor a function for readability
-- diagnose a failing test from error text
-- summarize a long technical document
-- generate a shell command from a task description
-
-Record:
-
-- usefulness
-- hallucination rate
-- verbosity fit
-- whether responses are fast enough to feel interactive
-
-This matters because benchmark leaders are not always the best day-to-day assistants.
 
 ## Phase 2: Deep Benchmark (overnight or weekend)
 
 Goal: compare the top 2 or 3 model configurations in more realistic settings.
 
-### General-purpose evaluation
+### Step 1: General-purpose evaluation
 
 Expand `lm-evaluation-harness` to include:
 
-- `mmlu_pro` if you want a harder knowledge benchmark than `mmlu`
-- `truthfulqa` for hallucination resistance
-- `bbh` subset if you want harder reasoning
+- full `GSM8K`: math and chain-of-thought reasoning
+- full `IFEval` (instruction following)
+- `mmlu_pro` (log-likelihood, general knowledge)
+- `truthfulqa` (log-likelihood, hallucination resistance)
+- `bbh`
 
-Do not run every possible benchmark. Use a curated set that covers:
 
-- knowledge
-- reasoning
-- instruction following
-- truthfulness
+### Step 2: Specific benchmarks
 
-### Coding evaluation
-
-Keep `EvalPlus`, then add one of:
-
+- `EvalPlus MBPP+`
+- full `Aider` (code editing)
 - `LiveCodeBench` for broader and newer coding tasks
-- a private prompt pack derived from your own work
+- Full `BFCL` (tool calling)
+- a private prompt pack
 
-The private prompt pack is often more valuable than another public benchmark if your goal is real productivity.
-
-### Code editing evaluation
-
-Run the full `Aider` polyglot benchmark if Phase 1 used a subset, or run it against harder tasks.
-
-Use it to confirm:
-
-- can the model make correct edits across different languages?
-- does accuracy hold up on larger or more complex edit tasks?
-- how does it compare to Phase 1 results with more thorough testing?
-
-### Tool calling evaluation
-
-Run a broader set of `BFCL` tasks if Phase 1 used a subset.
-
-Test additional scenarios:
-
-- multiple function calls in one turn
-- functions with complex nested schemas
-- irrelevant functions mixed in to test selection accuracy
-
-## Suggested Prompt Packs
-
-Create three local prompt packs and keep them fixed for every run.
-
-### Pack A: General assistant
-
-Use 20 to 30 prompts:
-
-- summarization
-- factual QA
-- planning
-- extraction
-- instruction following
-- math and logic
-
-### Pack B: Coding assistant
-
-Use 20 to 30 prompts:
-
-- write functions
-- explain code
-- repair bugs from stack traces
-- generate tests
-- refactor code
-- regex and shell tasks
-
-### Pack C: Agent tasks
-
-Use 10 to 20 tasks:
-
-- inspect repo structure
-- identify bug source from logs
-- patch a broken function
-- update tests after a spec change
-- trace a failing command
-
-Score each item with a simple rubric:
-
-- `0` = failed
-- `1` = partly useful
-- `2` = correct and useful
-
-This gives a lightweight benchmark that reflects your real workflows better than public suites alone.
-
-## Exact Evaluation Flow
-
-For each model configuration:
-
-1. Run `llama-bench`
-2. Run a fixed latency test on 5 to 10 prompts
-3. Run `lm-evaluation-harness` (`GSM8K`, `MMLU`, `IFEval`)
-4. Run `EvalPlus` (`HumanEval+`, `MBPP+`)
-5. Run `Aider` polyglot benchmark
-6. Run `BFCL` subset
-7. Run prompt pack A and B
-
-Stop early if a model is clearly too slow or weak.
 
 ## Decision Rules
 
@@ -395,7 +191,6 @@ Optimize for:
 - good `MMLU`
 - good `GSM8K`
 - low latency
-- low hallucination rate in prompt pack A
 
 ### Best coding assistant
 
@@ -403,7 +198,6 @@ Optimize for:
 
 - strongest `EvalPlus`
 - strongest `Aider` score
-- good code explanation and bug-fix performance in prompt pack B
 - acceptable latency for iterative prompting
 
 ### Best coding agent
@@ -412,13 +206,9 @@ Optimize for:
 
 - `Aider` code editing success rate
 - `BFCL` tool calling accuracy
-- stability across multiple tasks
+
 
 The best coding assistant and the best coding agent may not be the same model.
-
-## Practical Thresholds for This Machine
-
-Use these rough thresholds when deciding whether to keep a model in contention.
 
 ### Keep for interactive use
 
@@ -434,30 +224,6 @@ Use these rough thresholds when deciding whether to keep a model in contention.
 
 As a rule of thumb, agent workflows punish slow models more than static benchmarks do.
 
-## Suggested First Comparison Set
-
-Start with this:
-
-- `Qwen2.5 7B Instruct`
-- `Qwen2.5-Coder 14B`
-- `Qwen2.5 14B Instruct`
-- `Qwen2.5-Coder 32B` if it fits and remains usable
-
-Alternative set if you want reasoning emphasis:
-
-- `Llama 3.1 8B Instruct`
-- `Qwen2.5 14B Instruct`
-- `QwQ 32B`
-
-## What to Skip Initially
-
-Do not spend early time on:
-
-- too many quantization variants
-- too many runtimes at once
-- giant context experiments before baseline results exist
-- leaderboard chasing without testing your own prompt packs
-- saturated benchmarks like `HellaSwag` or `Winogrande` that no longer discriminate between modern models
 
 ## Deliverables
 
@@ -474,18 +240,6 @@ At the end of the benchmark, produce:
   - best coding agent
   - best speed / quality tradeoff
 
-## Minimal Execution Plan
-
-If you want the leanest possible version, do this:
-
-1. Benchmark `3` models with `llama-bench`
-2. Run `gsm8k`, `mmlu`, `ifeval`
-3. Run `EvalPlus` (`HumanEval+`, `MBPP+`)
-4. Run `Aider` polyglot benchmark
-5. Run `BFCL` subset
-6. Run a `25`-prompt private prompt pack
-
-This is the highest-signal low-overhead version of the plan.
 
 ## Recommended Next Step
 
