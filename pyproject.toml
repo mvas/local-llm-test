@@ -1,0 +1,6 @@
+[project]
+name = "local-llm-benchmarks"
+version = "0.1.0"
+description = "Local LLM benchmark runner"
+requires-python = ">=3.10"
+dependencies = []

@@ -1,0 +1,47 @@
+[short]
+You are evaluating model latency. Reply with exactly one line:
+OK
+
+[medium]
+You are helping with local LLM benchmarking on Apple Silicon.
+
+Task:
+1) Explain what prompt processing speed means.
+2) Explain what generation speed means.
+3) Explain why TTFT can feel slow even when decode tok/s looks good.
+4) Provide two practical tuning tips for llama.cpp on macOS.
+
+Constraints:
+- Use concise bullet points.
+- Do not exceed 140 words.
+- Avoid markdown tables.
+
+[long]
+You are analyzing a benchmark plan for local code assistants on a laptop.
+
+Write a structured answer with these sections:
+1) "Risk Review"
+2) "Metric Design"
+3) "Execution Plan"
+4) "Result Interpretation"
+
+Context to use:
+- We compare multiple GGUF models with the same runtime.
+- Runtime is llama.cpp with Metal GPU offload.
+- We need fair comparison across models.
+- We care about user-perceived responsiveness and not only throughput.
+- Candidate model sizes range from 7B to 32B.
+- Some models are tuned for coding, some for reasoning.
+- Quantization differs by model and must be documented.
+- Context size changes memory usage significantly.
+
+Requirements:
+- In "Risk Review", list at least five specific risks that could invalidate comparisons.
+- In "Metric Design", define TTFT, prompt tok/s, decode tok/s, and end-to-end latency in one sentence each.
+- In "Execution Plan", provide a numbered plan with at least eight steps.
+- In "Result Interpretation", explain how to choose a winner for:
+  - daily assistant use
+  - coding assistant use
+  - agent-loop use
+- Keep the answer deterministic and practical.
+- Do not include disclaimers.
