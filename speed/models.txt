@@ -1,0 +1,21 @@
+# One GGUF model path per line.
+# Blank lines and lines starting with # are ignored.
+
+# Fast class
+~/models/Qwen_Qwen3.5-9B-Q4_K_L.gguf
+~/models/google_gemma-3n-E4B-it-Q4_K_M.gguf   
+~/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf 
+~/models/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf
+~/models/Qwen2.5.1-Coder-7B-Instruct-Q4_K_M.gguf
+
+# Balanced class
+~/models/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf
+~/models/Devstral-Small-2507-Q4_K_M.gguf
+~/models/gemma-3-12b-it-Q4_K_M.gguf
+~/models/Ministral-3-14B-Instruct-2512-Q4_K_M.gguf
+~/models/phi-4-Q4_K.gguf
+~/models/qwen2.5-coder-14b-instruct-q4_k_m.gguf
+~/models/Qwen3-14B-Q4_K_M.gguf
+
+# Strong class
+

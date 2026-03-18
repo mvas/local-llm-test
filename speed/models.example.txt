@@ -1,0 +1,11 @@
+# One GGUF model path per line.
+# Blank lines and lines starting with # are ignored.
+
+# Fast class
+~/models/Qwen_Qwen3.5-9B-Q4_K_L.gguf
+
+# Balanced class
+~/models/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf
+
+# Strong class
+~/models/Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf
