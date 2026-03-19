@@ -2,18 +2,13 @@
 from __future__ import annotations
 
 import argparse
-import ast
 from dataclasses import asdict, dataclass, fields
-import gzip
-import json
 import os
 from pathlib import Path
-import re
 import signal
 import statistics
 import subprocess
 import sys
-import time
 import urllib.error
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -28,8 +23,13 @@ from common import (
     write_csv,
     append_csv_row,
     start_server,
-    cleanup_server
+    cleanup_server,
+    Metric,
+    ModelContext,
 )
+from suite_evalplus import run_humaneval_suite
+from suite_lm_eval import run_lm_eval_suite
+from suite_templated import run_external_template_suite
 
 
 DEFAULTS = {
@@ -57,40 +57,20 @@ DEFAULTS = {
     "ifeval_limit": 40,
     "ifeval_fewshot": 0,
     "humaneval_limit": 20,
-    "run_humaneval": True,
+    "run_humaneval": False,
+    "run_bfcl": False,
+    "run_aider": False,
 }
 
-
+# LM-Eval suites with default limit and fewshot
 LM_EVAL_SUITES = (
-    ("gsm8k", "gsm8k", DEFAULTS["gsm8k_limit"], DEFAULTS["gsm8k_fewshot"]),
-    ("mmlu", "mmlu", DEFAULTS["mmlu_limit"], DEFAULTS["mmlu_fewshot"]),
-    ("ifeval", "ifeval", DEFAULTS["ifeval_limit"], DEFAULTS["ifeval_fewshot"]),
+    ("gsm8k", DEFAULTS["gsm8k_limit"], DEFAULTS["gsm8k_fewshot"]),
+    ("mmlu", DEFAULTS["mmlu_limit"], DEFAULTS["mmlu_fewshot"]),
+    ("ifeval", DEFAULTS["ifeval_limit"], DEFAULTS["ifeval_fewshot"]),
 )
 
 @dataclass(frozen=True)
-class MetricRow:
-    timestamp: str
-    model_path: str
-    model_name: str
-    suite: str
-    task_name: str
-    metric_name: str
-    metric_value: str
-    metric_stderr: str
-    limit: int
-    status: str
-    error_note: str
-
-    @classmethod
-    def headers(cls) -> List[str]:
-        return [f.name for f in fields(cls)]
-
-    def to_dict(self) -> Dict[str, object]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class SummaryRow:
+class Summary:
     timestamp: str
     model_path: str
     model_name: str
@@ -117,7 +97,7 @@ class SummaryRow:
 
 
 @dataclass(frozen=True)
-class SuiteRunRow:
+class SuiteRun:
     timestamp: str
     model_path: str
     model_name: str
@@ -137,12 +117,12 @@ class SuiteRunRow:
         return asdict(self)
 
 
-METRIC_FIELDS = MetricRow.headers()
-SUMMARY_FIELDS = SummaryRow.headers()
-SUITE_RUN_FIELDS = SuiteRunRow.headers()
+METRIC_FIELDS = Metric.headers()
+SUMMARY_FIELDS = Summary.headers()
+SUITE_RUN_FIELDS = SuiteRun.headers()
 
 
-def read_tokenizer_map_file(path: Path) -> Dict[str, str]:
+def _read_tokenizer_map_file(path: Path) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
@@ -161,7 +141,7 @@ def read_tokenizer_map_file(path: Path) -> Dict[str, str]:
     return mapping
 
 
-def write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]) -> None:
+def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]) -> None:
     lines = [
         f"run_timestamp_utc={now_iso()}",
         f"models_file={args.models_file}",
@@ -193,380 +173,7 @@ def write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def flatten_numeric_metrics(prefix: str, value: object, out: Dict[str, float]) -> None:
-    if isinstance(value, bool):
-        return
-    if isinstance(value, (int, float)):
-        out[prefix] = float(value)
-        return
-    if isinstance(value, dict):
-        for key, inner in value.items():
-            next_prefix = f"{prefix}.{key}" if prefix else str(key)
-            flatten_numeric_metrics(next_prefix, inner, out)
-
-
-def find_result_json(root: Path) -> Path:
-    candidates = sorted(root.rglob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    for candidate in candidates:
-        try:
-            payload = json.loads(candidate.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if isinstance(payload, dict) and ("results" in payload or "groups" in payload):
-            return candidate
-    raise BenchmarkError(f"could not find lm-eval JSON results under {root}")
-
-
-def extract_lm_eval_metrics(payload: Dict[str, object], suite_name: str) -> Dict[str, float]:
-    metrics: Dict[str, float] = {}
-    groups = payload.get("groups")
-    if isinstance(groups, dict) and isinstance(groups.get(suite_name), dict):
-        flatten_numeric_metrics("", groups[suite_name], metrics)
-        if metrics:
-            return metrics
-
-    results = payload.get("results")
-    if isinstance(results, dict) and isinstance(results.get(suite_name), dict):
-        flatten_numeric_metrics("", results[suite_name], metrics)
-        if metrics:
-            return metrics
-
-    if isinstance(results, dict):
-        for task_name, task_metrics in results.items():
-            if isinstance(task_metrics, dict) and (
-                task_name == suite_name or str(task_name).startswith(f"{suite_name}_")
-            ):
-                flatten_numeric_metrics(str(task_name), task_metrics, metrics)
-
-    if not metrics:
-        raise BenchmarkError(f"no numeric metrics found for suite {suite_name}")
-    return metrics
-
-
-def pick_primary_metric(suite_name: str, metrics: Dict[str, float]) -> Tuple[str, str]:
-    preferred_by_suite = {
-        "gsm8k": ["exact_match,flexible-extract", "exact_match,strict-match", "exact_match,none"],
-        "mmlu": ["acc,none", "acc_norm,none"],
-        "ifeval": [
-            "prompt_level_strict_acc,none",
-            "inst_level_strict_acc,none",
-            "prompt_level_loose_acc,none",
-        ],
-        "humaneval": ["plus.pass@1", "base.pass@1"],
-        "bfcl": ["score", "accuracy", "pass@1"],
-        "aider": ["score", "pass_rate", "success_rate"],
-    }
-    for candidate in preferred_by_suite.get(suite_name, []):
-        if candidate in metrics:
-            return candidate, f"{metrics[candidate]:.6f}"
-
-    for key in sorted(metrics):
-        return key, f"{metrics[key]:.6f}"
-    return "", ""
-
-
-def run_logged_command(
-    cmd: List[str],
-    stdout_path: Path,
-    stderr_path: Path,
-    timeout_s: int,
-    env: Optional[Dict[str, str]] = None,
-    shell: bool = False,
-) -> subprocess.CompletedProcess[str]:
-    with stdout_path.open("w", encoding="utf-8") as stdout_handle, stderr_path.open(
-        "w", encoding="utf-8"
-    ) as stderr_handle:
-        return subprocess.run(
-            cmd if not shell else cmd[0],
-            stdout=stdout_handle,
-            stderr=stderr_handle,
-            text=True,
-            timeout=timeout_s,
-            env=env,
-            shell=shell,
-            check=False,
-        )
-
-
-def run_lm_eval_suite(
-    ctx: ModelContext,
-    tokenizer_id: str,
-    suite_name: str,
-    task_name: str,
-    limit: int,
-    fewshot: int,
-    suite_dir: Path,
-) -> Tuple[str, str, List[MetricRow], str]:
-    suite_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = suite_dir / "stdout.log"
-    stderr_path = suite_dir / "stderr.log"
-
-    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1/completions"
-    model_args = ",".join(
-        [
-            f"model={ctx.model_slug}",
-            f"base_url={base_url}",
-            f"num_concurrent={ctx.args.num_concurrent}",
-            f"max_retries={ctx.args.max_retries}",
-            "tokenized_requests=False",
-            f"max_length={ctx.args.ctx}",
-            f"max_gen_toks={ctx.args.max_gen_toks}",
-            f"seed={ctx.args.seed}",
-        ]
-    )
-    if tokenizer_id:
-        model_args += f",tokenizer={tokenizer_id},tokenizer_backend=huggingface"
-
-    cmd = [
-        ctx.args.lm_eval_bin,
-        "--model",
-        "local-completions",
-        "--model_args",
-        model_args,
-        "--tasks",
-        task_name,
-        "--num_fewshot",
-        str(fewshot),
-        "--limit",
-        str(limit),
-        "--output_path",
-        str(suite_dir),
-    ]
-
-    started = time.perf_counter()
-    proc = run_logged_command(cmd, stdout_path, stderr_path, timeout_s=ctx.args.suite_timeout_s)
-    runtime_s = time.perf_counter() - started
-    if proc.returncode != 0:
-        raise BenchmarkError(f"lm-eval failed for {suite_name} (see {stderr_path})")
-
-    result_json = find_result_json(suite_dir)
-    payload = json.loads(result_json.read_text(encoding="utf-8"))
-    metrics = extract_lm_eval_metrics(payload, suite_name)
-
-    metric_rows = []
-    for metric_name, metric_value in sorted(metrics.items()):
-        metric_stderr = ""
-        if metric_name.endswith("_stderr,none"):
-            continue
-        stderr_key = f"{metric_name}_stderr,none"
-        if stderr_key in metrics:
-            metric_stderr = f"{metrics[stderr_key]:.6f}"
-        newRow = MetricRow(
-                timestamp=ctx.ts_slug,
-                model_path=ctx.model_path,
-                model_name=ctx.model_slug,
-                suite=suite_name,
-                task_name=task_name,
-                metric_name=metric_name,
-                metric_value=f"{metric_value:.6f}",
-                metric_stderr=metric_stderr,
-                limit=limit,
-                status="ok",
-                error_note="",
-            )
-        metric_rows.append(newRow)
-
-    primary_name, primary_value = pick_primary_metric(suite_name, metrics)
-    return primary_name, primary_value, metric_rows, f"{runtime_s:.3f}"
-
-
-def create_humaneval_subset(limit: int, output_path: Path) -> None:
-    try:
-        from evalplus.data import get_human_eval_plus
-    except ImportError as exc:
-        raise BenchmarkError(
-            "EvalPlus Python package is required to create a HumanEval+ subset"
-        ) from exc
-
-    problems = list(get_human_eval_plus().items())
-    if not problems:
-        raise BenchmarkError("EvalPlus returned no HumanEval+ tasks")
-    subset = problems[:limit]
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with gzip.open(output_path, "wt", encoding="utf-8") as handle:
-        for task_id, payload in subset:
-            row = {"task_id": task_id}
-            row.update(payload)
-            handle.write(json.dumps(row) + "\n")
-
-
-def find_latest_matching(root: Path, pattern: str) -> Path:
-    candidates = sorted(root.rglob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not candidates:
-        raise BenchmarkError(f"could not find {pattern} under {root}")
-    return candidates[0]
-
-
-def parse_evalplus_stdout(text: str) -> Dict[str, float]:
-    metrics: Dict[str, float] = {}
-    base_match = re.search(r"Base\s*\n(\{[^\n]+\})", text, flags=re.MULTILINE)
-    plus_match = re.search(r"Base \+ Extra\s*\n(\{[^\n]+\})", text, flags=re.MULTILINE)
-    if base_match:
-        payload = ast.literal_eval(base_match.group(1))
-        if isinstance(payload, dict):
-            for key, value in payload.items():
-                if isinstance(value, (int, float)):
-                    metrics[f"base.{key}"] = float(value)
-    if plus_match:
-        payload = ast.literal_eval(plus_match.group(1))
-        if isinstance(payload, dict):
-            for key, value in payload.items():
-                if isinstance(value, (int, float)):
-                    metrics[f"plus.{key}"] = float(value)
-    if not metrics:
-        raise BenchmarkError("could not parse EvalPlus results from stdout")
-    return metrics
-
-
-def run_humaneval_suite(
-    ctx: ModelContext,
-    suite_dir: Path,
-) -> Tuple[str, str, List[MetricRow], str]:
-    ensure_commands_exist([ctx.args.evalplus_codegen_bin, ctx.args.evalplus_evaluate_bin])
-    suite_dir.mkdir(parents=True, exist_ok=True)
-    subset_path = suite_dir / "humaneval_subset.jsonl.gz"
-    create_humaneval_subset(ctx.args.humaneval_limit, subset_path)
-
-    env = os.environ.copy()
-    env["HUMANEVAL_OVERRIDE_PATH"] = str(subset_path)
-    env.setdefault("OPENAI_API_KEY", "local-benchmark")
-    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1"
-
-    codegen_stdout = suite_dir / "codegen.stdout.log"
-    codegen_stderr = suite_dir / "codegen.stderr.log"
-    codegen_cmd = [
-        ctx.args.evalplus_codegen_bin,
-        "--model",
-        ctx.model_slug,
-        "--backend",
-        "openai",
-        "--base-url",
-        base_url,
-        "--dataset",
-        "humaneval",
-        "--root",
-        str(suite_dir / "codegen"),
-        "--greedy",
-    ]
-
-    started = time.perf_counter()
-    codegen_proc = run_logged_command(
-        codegen_cmd,
-        codegen_stdout,
-        codegen_stderr,
-        timeout_s=ctx.args.suite_timeout_s,
-        env=env,
-    )
-    if codegen_proc.returncode != 0:
-        raise BenchmarkError(f"EvalPlus code generation failed (see {codegen_stderr})")
-
-    samples_path = find_latest_matching(suite_dir / "codegen", "*.jsonl")
-    eval_stdout = suite_dir / "evaluate.stdout.log"
-    eval_stderr = suite_dir / "evaluate.stderr.log"
-    eval_cmd = [
-        ctx.args.evalplus_evaluate_bin,
-        "--dataset",
-        "humaneval",
-        "--samples",
-        str(samples_path),
-    ]
-
-    eval_proc = run_logged_command(
-        eval_cmd,
-        eval_stdout,
-        eval_stderr,
-        timeout_s=ctx.args.suite_timeout_s,
-        env=env,
-    )
-    runtime_s = time.perf_counter() - started
-    if eval_proc.returncode != 0:
-        raise BenchmarkError(f"EvalPlus evaluation failed (see {eval_stderr})")
-
-    metrics = parse_evalplus_stdout(eval_stdout.read_text(encoding="utf-8"))
-
-    metric_rows = [MetricRow(timestamp=ctx.ts_slug,
-                            model_path=ctx.model_path,
-                            model_name=ctx.model_slug,
-                            suite="humaneval",
-                            task_name="humaneval",
-                            metric_name=metric_name,
-                            metric_value=f"{metric_value:.6f}",
-                            metric_stderr="",
-                            limit=ctx.args.humaneval_limit,
-                            status="ok",
-                            error_note="",
-                        ) for metric_name, metric_value in sorted(metrics.items())]
-    primary_name, primary_value = pick_primary_metric("humaneval", metrics)
-    return primary_name, primary_value, metric_rows, f"{runtime_s:.3f}"
-
-
-def run_external_template_suite(
-    suite_name: str,
-    template: str,
-    ctx: ModelContext,
-    suite_dir: Path,
-    limit: int,
-) -> Tuple[str, str, List[MetricRow], str]:
-    if not template:
-        raise BenchmarkError(f"{suite_name} command template was not provided")
-
-    suite_dir.mkdir(parents=True, exist_ok=True)
-    stdout_path = suite_dir / "stdout.log"
-    stderr_path = suite_dir / "stderr.log"
-    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1"
-    command_text = template.format(
-        model_name=ctx.model_slug,
-        model_path=ctx.model_path,
-        base_url=base_url,
-        host=ctx.args.server_host,
-        port=ctx.args.server_port,
-        suite_dir=suite_dir,
-        limit=limit,
-        ctx=ctx.args.ctx,
-        seed=ctx.args.seed,
-    )
-
-    started = time.perf_counter()
-    proc = run_logged_command(
-        [command_text],
-        stdout_path,
-        stderr_path,
-        timeout_s=ctx.args.suite_timeout_s,
-        env=os.environ.copy(),
-        shell=True,
-    )
-    runtime_s = time.perf_counter() - started
-    if proc.returncode != 0:
-        raise BenchmarkError(f"{suite_name} command failed (see {stderr_path})")
-
-    raw_metrics = re.findall(r"([A-Za-z0-9_@./+-]+)=([0-9]+(?:\.[0-9]+)?)", stdout_path.read_text(encoding="utf-8"))
-    metrics = {name: float(value) for name, value in raw_metrics}
-    if not metrics:
-        metrics = {"exit_code": 0.0}
-
-    primary_name, primary_value = pick_primary_metric(suite_name, metrics)
-    metric_rows = [MetricRow(timestamp=ctx.ts_slug,
-                            model_path=ctx.model_path,
-                            model_name=ctx.model_slug,
-                            suite=suite_name,
-                            task_name=suite_name,
-                            metric_name=metric_name,
-                            metric_value=f"{metric_value:.6f}",
-                            metric_stderr="",
-                            limit=limit,
-                            status="ok",
-                            error_note="",
-                        ) for metric_name, metric_value in sorted(metrics.items())]
-    return primary_name, primary_value, metric_rows, f"{runtime_s:.3f}"
-
-
-def safe_median(values: List[float]) -> str:
-    if not values:
-        return ""
-    return f"{statistics.median(values):.6f}"
-
-
-def parse_args() -> argparse.Namespace:
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run a quick local quality benchmark against llama.cpp-served GGUF models.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -599,35 +206,47 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mmlu-fewshot", type=int, default=DEFAULTS["mmlu_fewshot"])
     parser.add_argument("--ifeval-limit", type=int, default=DEFAULTS["ifeval_limit"])
     parser.add_argument("--ifeval-fewshot", type=int, default=DEFAULTS["ifeval_fewshot"])
-    parser.add_argument("--humaneval-limit", type=int, default=DEFAULTS["humaneval_limit"])
     parser.add_argument(
         "--run-humaneval",
         action=argparse.BooleanOptionalAction,
         default=DEFAULTS["run_humaneval"],
         help="Run EvalPlus HumanEval+ subset if EvalPlus is installed.",
     )
+    parser.add_argument("--humaneval-limit", type=int, default=DEFAULTS["humaneval_limit"])
     parser.add_argument(
-        "--bfcl-command-template",
-        default="",
-        help=(
-            "Optional shell command template for BFCL. Available placeholders: "
-            "{model_name}, {model_path}, {base_url}, {host}, {port}, {suite_dir}, {limit}, {ctx}, {seed}"
-        ),
+        "--run-bfcl",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULTS["run_bfcl"],
+        help="Run BFCL benchmark subset if BFCL is installed.",
     )
     parser.add_argument("--bfcl-limit", type=int, default=20)
     parser.add_argument(
-        "--aider-command-template",
-        default="",
-        help=(
-            "Optional shell command template for Aider benchmark subset. Available placeholders: "
-            "{model_name}, {model_path}, {base_url}, {host}, {port}, {suite_dir}, {limit}, {ctx}, {seed}"
-        ),
+        "--run-aider",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULTS["run_aider"],
+        help="Run Aider benchmark subset if Aider is installed.",
     )
     parser.add_argument("--aider-limit", type=int, default=20)
+    # parser.add_argument(
+    #     "--bfcl-command-template",
+    #     default="",
+    #     help=(
+    #         "Optional shell command template for BFCL. Available placeholders: "
+    #         "{model_name}, {model_path}, {base_url}, {host}, {port}, {suite_dir}, {limit}, {ctx}, {seed}"
+    #     ),
+    # )
+    # parser.add_argument(
+    #     "--aider-command-template",
+    #     default="",
+    #     help=(
+    #         "Optional shell command template for Aider benchmark subset. Available placeholders: "
+    #         "{model_name}, {model_path}, {base_url}, {host}, {port}, {suite_dir}, {limit}, {ctx}, {seed}"
+    #     ),
+    # )
     return parser.parse_args()
 
 
-def benchmark_model(ctx: ModelContext, model_raw_dir: Path,
+def _benchmark_model(ctx: ModelContext,
     summary_csv: Path, suite_runs_csv: Path, metrics_csv: Path, tokenizer_map: Dict[str, str]) -> None:
 
     summary_values: Dict[str, str] = {
@@ -639,8 +258,8 @@ def benchmark_model(ctx: ModelContext, model_raw_dir: Path,
         "aider_primary_metric": "",
     }
 
-    def getSuiteRunRow(suite: str, limit: int, status: str, runtime_s: str = "", primary_metric_name: str = "", primary_metric_value: str = "", error_note: str = "") -> SuiteRunRow:
-        return SuiteRunRow(
+    def getSuiteRunRow(suite: str, limit: int, status: str, runtime_s: str = "", primary_metric_name: str = "", primary_metric_value: str = "", error_note: str = "") -> SuiteRun:
+        return SuiteRun(
                         timestamp=ctx.ts_slug,
                         model_path=ctx.model_path,
                         model_name=ctx.model_slug,
@@ -653,7 +272,7 @@ def benchmark_model(ctx: ModelContext, model_raw_dir: Path,
                         error_note=error_note,
                     )
 
-    def run_benchmark_suite(suite_name: str, limit: int, runner: Callable[[], Tuple[str, str, List[MetricRow], str]]) -> Tuple[bool, str]:
+    def run_benchmark_suite(suite_name: str, limit: int, runner: Callable[[], Tuple[str, str, List[Metric], str]]) -> Tuple[bool, str]:
         try:
             primary_name, primary_value, metrics, runtime_s = runner()
             append_csv_row(
@@ -678,59 +297,54 @@ def benchmark_model(ctx: ModelContext, model_raw_dir: Path,
     model_status = "ok"
     model_errors: List[str] = []
     try:
-        server_log = model_raw_dir / "server.log"
+        server_log = ctx.model_raw_dir / "server.log"
         global server_proc
         server_proc = start_server(
-            ctx.args.llama_server_bin, server_log, model_path, ctx.args.ngl, ctx.args.ctx,
+            ctx.args.llama_server_bin, server_log, ctx.model_path, ctx.args.ngl, ctx.args.ctx,
             ctx.args.server_host, ctx.args.server_port, None, ctx.args.temp, ctx.args.top_p, ctx.args.seed)
 
-        for suite_name, task_name, default_limit, default_fewshot in LM_EVAL_SUITES:
+        # Run LM-Eval suites
+        for suite_name, default_limit, default_fewshot in LM_EVAL_SUITES:
             limit = getattr(ctx.args, f"{suite_name}_limit", default_limit)
             fewshot = getattr(ctx.args, f"{suite_name}_fewshot", default_fewshot)
-            suite_dir = model_raw_dir / suite_name
 
             success, primary_value = run_benchmark_suite(suite_name, limit, lambda: run_lm_eval_suite(
                 ctx=ctx,
                 tokenizer_id=tokenizer_map.get(ctx.model_path, ""),
                 suite_name=suite_name,
-                task_name=task_name,
                 limit=limit,
                 fewshot=fewshot,
-                suite_dir=suite_dir,
             ))
             summary_values[f"{suite_name}_primary_metric"] = primary_value
             if not success:
                 model_status = "partial"
 
+        # Run EvalPlus HumanEval+ subset
         if ctx.args.run_humaneval:
-            suite_dir = model_raw_dir / "humaneval"
-
             success, primary_value = run_benchmark_suite(
-                "humaneval", ctx.args.humaneval_limit,lambda: run_humaneval_suite(ctx=ctx, suite_dir=suite_dir))
+                "humaneval", ctx.args.humaneval_limit, lambda: run_humaneval_suite(ctx=ctx))
             summary_values["humaneval_plus_pass_at_1"] = primary_value
             if not success:
                 model_status = "partial"
 
-        if ctx.args.bfcl_command_template:
-            suite_dir = model_raw_dir / "bfcl"
+        # Run BFCL benchmark subset
+        if ctx.args.run_bfcl:
             success, primary_value = run_benchmark_suite("bfcl", ctx.args.bfcl_limit, lambda: run_external_template_suite(
                 suite_name="bfcl",
                 template=ctx.args.bfcl_command_template,
                 ctx=ctx,
-                suite_dir=suite_dir,
                 limit=ctx.args.bfcl_limit,
             ))
             summary_values["bfcl_primary_metric"] = primary_value
             if not success:
                 model_status = "partial"
 
-        if ctx.args.aider_command_template:
-            suite_dir = model_raw_dir / "aider"
+        # Run Aider benchmark subset
+        if ctx.args.run_aider:
             success, primary_value = run_benchmark_suite("aider", ctx.args.aider_limit, lambda: run_external_template_suite(
                 suite_name="aider",
                 template=ctx.args.aider_command_template,
                 ctx=ctx,
-                suite_dir=suite_dir,
                 limit=ctx.args.aider_limit,
             ))
             summary_values["aider_primary_metric"] = primary_value
@@ -747,7 +361,7 @@ def benchmark_model(ctx: ModelContext, model_raw_dir: Path,
         append_csv_row(
             summary_csv,
             SUMMARY_FIELDS,
-            SummaryRow(
+            Summary(
                 timestamp=ctx.ts_slug,
                 model_path=ctx.model_path,
                 model_name=ctx.model_slug,
@@ -770,15 +384,9 @@ def benchmark_model(ctx: ModelContext, model_raw_dir: Path,
 
 server_proc: Optional[subprocess.Popen[str]] = None
 
-@dataclass(frozen=True)
-class ModelContext:
-    args: argparse.Namespace
-    ts_slug: str
-    model_path: str
-    model_slug: str
 
 def main() -> int:
-    args = parse_args()
+    args = _parse_args()
     models_file = Path(args.models_file)
     if not models_file.is_file():
         raise BenchmarkError(f"models file not found: {models_file}")
@@ -792,7 +400,7 @@ def main() -> int:
         tokenizer_path = Path(args.tokenizer_map_file)
         if not tokenizer_path.is_file():
             raise BenchmarkError(f"tokenizer map file not found: {tokenizer_path}")
-        tokenizer_map = read_tokenizer_map_file(tokenizer_path)
+        tokenizer_map = _read_tokenizer_map_file(tokenizer_path)
 
     ts_slug = timestamp_slug()
     run_dir = Path(args.out_dir_base) / ts_slug
@@ -806,7 +414,7 @@ def main() -> int:
     write_csv(summary_csv, SUMMARY_FIELDS)
     write_csv(suite_runs_csv, SUITE_RUN_FIELDS)
     write_csv(metrics_csv, METRIC_FIELDS)
-    write_meta(meta_file, args, models)
+    _write_meta(meta_file, args, models)
 
     print(f"Run directory: {run_dir}")
     print()
@@ -828,7 +436,7 @@ def main() -> int:
             append_csv_row(
                 summary_csv,
                 SUMMARY_FIELDS,
-                SummaryRow(
+                Summary(
                     timestamp=ts_slug,
                     model_path=model_path,
                     model_name=model_slug,
@@ -844,8 +452,11 @@ def main() -> int:
             print(f"  - ERROR: {err}")
             print()
             continue
-        context = ModelContext(args=args, ts_slug=ts_slug, model_path=model_path, model_slug=model_slug)
-        benchmark_model(context, model_raw_dir, summary_csv, suite_runs_csv, metrics_csv, tokenizer_map)
+        context = ModelContext(
+            args=args, ts_slug=ts_slug,
+            model_path=model_path, model_slug=model_slug,
+            model_raw_dir=model_raw_dir)
+        _benchmark_model(context, summary_csv, suite_runs_csv, metrics_csv, tokenizer_map)
 
     print("Done.")
     print(f"Summary CSV: {summary_csv}")

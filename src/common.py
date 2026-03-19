@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import argparse
 import csv
+from dataclasses import asdict, dataclass, fields
 import datetime as dt
 import os
 from pathlib import Path
@@ -14,6 +16,36 @@ from typing import Dict, Iterable, List, Optional
 
 class BenchmarkError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ModelContext:
+    args: argparse.Namespace
+    ts_slug: str
+    model_path: str
+    model_slug: str
+    model_raw_dir: Path
+
+@dataclass(frozen=True)
+class Metric:
+    timestamp: str
+    model_path: str
+    model_name: str
+    suite: str
+    metric_name: str
+    metric_value: str
+    metric_stderr: str
+    limit: int
+    status: str
+    error_note: str
+
+    @classmethod
+    def headers(cls) -> List[str]:
+        return [f.name for f in fields(cls)]
+
+    def to_dict(self) -> Dict[str, object]:
+        return asdict(self)
+
 
 
 def now_iso() -> str:
