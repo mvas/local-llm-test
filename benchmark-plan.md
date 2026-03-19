@@ -56,6 +56,22 @@ Use these tools as the default benchmark stack:
 - `BFCL`
   - For tool/function calling evaluation
 
+
+Inference engine options in priority order for M4 Pro:
+
+1. llama.cpp — preferred (used for all other models; enables apples-to-apples 
+speed comparison).
+2. MLX / mlx_lm — best Apple Silicon alternative.
+Install: pip install mlx-lm.
+Run: mlx_lm.generate --model mlx-community/Qwen3.5-9B-4bit.
+Qwen3.5 MLX weights are typically on mlx-community within days of release.
+3. vLLM — most complete API compatibility, but requires a separate process and
+is less convenient for quick benchmarking.
+
+Speed numbers from different engines are NOT directly comparable. If Qwen3.5
+ends up on MLX, run Qwen3-32B on both engines to get a rough calibration
+factor and annotate results with the engine used.
+
 ## Runtime Recommendation
 
 Start with one runtime and keep it fixed for the first comparison round.

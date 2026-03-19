@@ -86,14 +86,6 @@ long context KV caches. Expected generation speed: 70–120 tok/s.
 | Ministral 3 8B Instruct   | 8B   | Arena Hard 0.509, WildBench 66.8, MATH 0.876 (Mistral model card, Dec 2025). Competes directly with Qwen3-8B on instruct tasks. Apache 2.0. 256K context, native function calling. Different training lineage from all other Fast class candidates. Mistral AI announcement.|
 
 
-Yi-Coder 9B was considered and rejected: qualitative tests and Aider Python score
-(54.1 %) both show it is weaker than Qwen2.5-Coder-7B (57.9 %) despite being larger.
-Llama 3.2 11B was rejected: it is a vision/multimodal model with no useful coding
-benchmark data.
-Qwen3-8B is not a primary candidate — use as the llama.cpp fallback for Qwen3.5-9B
-if the Gated DeltaNet architecture is unsupported. Official GGUF at
-Qwen/Qwen3-8B-GGUF; Q4_K_M 5.03 GB, Q8_0 8.71 GB.
-
 ---
 
 ### Balanced class candidates
@@ -117,8 +109,6 @@ If time is limited, prioritise:
 Qwen2.5-Coder-14B → Ministral 3 14B → Qwen3 14B → Phi-4-reasoning-plus → DeepSeek-R1-Distill-Qwen-14B.
 The others fill architecture/lineage gaps.
 
-Qwen2.5-14B-Instruct - dropped in favor of Qwen3 14B Instruct.
-
 ---
 
 ### Strong class candidates
@@ -138,24 +128,7 @@ Q8_0 (~34 GB). Expected generation speed: 15–25 tok/s.
 
 Note on Qwen3.5 architecture and inference engine selection:
 Qwen3.5-9B, Qwen3.5-27B, and Qwen3.5-35B-A3B use a Gated DeltaNet hybrid
-architecture (not a standard transformer). Before running, check whether
-llama.cpp has added a qwen3_5 backend (check llama.cpp releases or
-gguf-my-repo listings on HuggingFace).
-
-Inference engine options in priority order for M4 Pro:
-
-1. llama.cpp — preferred (used for all other models; enables apples-to-apples
-
-speed comparison). Use only if qwen3_5 GGUF support is confirmed.
-2. MLX / mlx_lm — best Apple Silicon alternative. Install: pip install mlx-lm.
-Run: mlx_lm.generate --model mlx-community/Qwen3.5-9B-4bit.
-Qwen3.5 MLX weights are typically on mlx-community within days of release.
-3. vLLM — most complete API compatibility, but requires a separate process and
-is less convenient for quick benchmarking.
-
-Speed numbers from different engines are NOT directly comparable. If Qwen3.5
-ends up on MLX, run Qwen3-32B on both engines to get a rough calibration
-factor and annotate results with the engine used.
+architecture (not a standard transformer). If llama.cpp does not support it - will need to use MLX / mlx_lm.
 
 Note on Qwen2.5-Coder-32B polyglot score: it scores only 16.4 % on the Aider
 polyglot leaderboard versus 71.4 % on the older Python-only benchmark. The
@@ -173,8 +146,8 @@ Include only if you want to know how much headroom a 70B model buys and if
 agent-loop latency is acceptable.
 
 
-| Model                  | Size | Why include                                                                                                                                                                                                              |
-| ---------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Model                  | Size | Why include |
+| ---------------------- | ---- | ----------- |
 | Llama 3.3 70B Instruct | 70B  | 59.4 % Aider Python benchmark. Q4_K_M fits in ~42 GB, leaving ~6 GB for KV cache. Generation speed roughly 7–12 tok/s on M4 Pro — borderline for agent loops. Important as a ceiling data point. Aider edit leaderboard. |
 
 
@@ -183,15 +156,18 @@ agent-loop latency is acceptable.
 ### Models ruled out (with reasons)
 
 
-| Model                                 | Reason                                                                                                                                                                                                   |
-| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Gemma 3 27B                           | 4.9 % on Aider polyglot; ranks #100/123 on BenchLM general leaderboard. Not competitive for coding agent use.                                                                                            |
-| Llama 4 Maverick                      | 15.6 % Aider polyglot. MoE model, 128 experts total (400B params, 17B active). Requires multi-GPU for full inference. Not suitable as a primary local candidate.                                         |
-| Qwen3-Coder-Next (80B MoE, 3B active) | Theoretically fits at ~46 GB Q4, but leaves almost nothing for KV cache at 256K context. Very new; llama.cpp GGUF support needs verification. Revisit if memory budget increases or MLX support matures. |
-| DeepSeek V3 / R1 (671B)               | Too large. Would require 4–8× 80 GB GPUs. No local path on this machine.                                                                                                                                 |
-| Codestral 22B                         | 48.1 % Aider Python, 11.1 % Aider polyglot. Weaker than Qwen2.5-Coder-14B at a larger size. Poor return on memory investment.                                                                            |
-| Mistral Small 3.1 24B                 | Replaced by Devstral-Small-2507 (same base, purpose-built for coding agents, #1 SWE-bench). Ministral 3 14B also likely outperforms it on general benchmarks at half the size and 40 % faster.           |
-| Qwen3-30B-A3B Coder                   | Not a primary candidate — use as llama.cpp fallback for Qwen3.5-35B-A3B if the Gated DeltaNet architecture is unsupported. Official GGUF available; confirmed Metal backend on Apple Silicon.            |
-| Qwen3-8B                              | Not a primary candidate — use as llama.cpp fallback for Qwen3.5-9B if the Gated DeltaNet architecture is unsupported. Official GGUF at Qwen/Qwen3-8B-GGUF; Q4_K_M 5.03 GB, Q8_0 8.71 GB.                 |
+| Model                   | Size     | Reason        |
+| ----------------------- | -------- | -------- |
+| Yi-Coder 9B             | 9B       | qualitative tests and Aider Python score (54.1 %) both show it is weaker than Qwen2.5-Coder-7B (57.9 %) despite being larger |
+| Llama 3.2 11B           | 11B      | Vision/multimodal model with no useful coding benchmark data. Dropped in favor of Llama 3.1 8B |
+| Qwen2.5-14B-Instruct    | 14B      | dropped in favor of Qwen3 14B Instruct |
+| Codestral 22B           | 22B      | 48.1 % Aider Python, 11.1 % Aider polyglot. Weaker than Qwen2.5-Coder-14B at a larger size. Poor return on memory investment. |
+| Mistral Small 3.1 24B   | 24B      | Replaced by Devstral-Small-2507 (same base, purpose-built for coding agents, #1 SWE-bench). Ministral 3 14B also likely outperforms it on general benchmarks at half the size and 40 % faster. |
+| Gemma 3 27B             | 27B      | 4.9 % on Aider polyglot; ranks #100/123 on BenchLM general leaderboard. Not competitive for coding agent use. |
+| Qwen3-Coder-Next        | 80B MoE  | 512 experts total, 3B active. Theoretically fits at ~46 GB Q4, but leaves almost nothing for KV cache at 256K context. Very new; llama.cpp GGUF support needs verification. Revisit if memory budget increases or MLX support matures. |
+| Llama 4 Maverick        | 400B MoE | 128 experts total, 17B active. Requires multi-GPU for full inference. Not suitable as a primary local candidate. |
+| DeepSeek V3 / R1        | 671B MoE | 37B active. Would require 4–8× 80 GB GPUs. No local path on this machine. |
+| Qwen3-30B-A3B Coder     | 30B MoE  | 3B active. Not a primary candidate — use as llama.cpp fallback for Qwen3.5-35B-A3B if the Gated DeltaNet architecture is unsupported. |
+| Qwen3-8B                | 8B       | Not a primary candidate — use as llama.cpp fallback for Qwen3.5-9B if the Gated DeltaNet architecture is unsupported. |
 
 
