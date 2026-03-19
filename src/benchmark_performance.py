@@ -616,7 +616,7 @@ def parse_args() -> argparse.Namespace:
         description="Run a quick local quality benchmark against llama.cpp-served GGUF models.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("models_file", help="Path to models list file (same format as speed/models.txt).")
+    parser.add_argument("models_file", help="Path to models list file (same format as models/models.txt).")
     parser.add_argument(
         "--tokenizer-map-file",
         default="",

@@ -32,7 +32,7 @@ DEFAULTS = {
     "bench_repetitions": 3, # Number of repetitions to run in llama-bench
     "server_host": "127.0.0.1",
     "server_port": 8081,
-    "prompts_file": "speed/prompts.txt",
+    "prompts_file": "models/prompts.txt",
     "out_dir_base": "results/speed",
     "llama_bench_bin": os.environ.get("LLAMA_BENCH_BIN", "llama-bench"),
     "llama_server_bin": os.environ.get("LLAMA_SERVER_BIN", "llama-server"),

@@ -9,4 +9,4 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-exec uv run --project . python speed/benchmark_speed.py "$@"
+exec uv run --project . python src/benchmark_speed.py "$@"
