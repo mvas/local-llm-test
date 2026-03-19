@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.error
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from common import ( 
     now_iso,
@@ -27,7 +27,8 @@ from common import (
     ensure_commands_exist,
     write_csv,
     append_csv_row,
-    wait_for_health
+    start_server,
+    cleanup_server
 )
 
 
@@ -98,14 +99,14 @@ class SummaryRow:
     temperature: float
     top_p: float
     seed: int
-    gsm8k_primary_metric: str
-    mmlu_primary_metric: str
-    ifeval_primary_metric: str
-    humaneval_plus_pass_at_1: str
-    bfcl_primary_metric: str
-    aider_primary_metric: str
-    status: str
-    error_note: str
+    gsm8k_primary_metric: str = ""
+    mmlu_primary_metric: str = ""
+    ifeval_primary_metric: str = ""
+    humaneval_plus_pass_at_1: str = ""
+    bfcl_primary_metric: str = ""
+    aider_primary_metric: str = ""
+    status: str = ""
+    error_note: str = ""
 
     @classmethod
     def headers(cls) -> List[str]:
@@ -287,76 +288,37 @@ def run_logged_command(
         )
 
 
-def start_server(args: argparse.Namespace, model_path: str, server_log: Path) -> subprocess.Popen[str]:
-    cmd = [
-        args.llama_server_bin,
-        "-m",
-        model_path,
-        "-ngl",
-        str(args.ngl),
-        "-c",
-        str(args.ctx),
-        "--reasoning",
-        "off",
-        "--host",
-        args.server_host,
-        "--port",
-        str(args.server_port),
-        "--temp",
-        str(args.temp),
-        "--top-p",
-        str(args.top_p),
-        "--seed",
-        str(args.seed),
-    ]
-    with server_log.open("w", encoding="utf-8") as log_handle:
-        proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, text=True)
-    return proc
-
-
-def cleanup_server(server_proc: Optional[subprocess.Popen[str]]) -> None:
-    if server_proc is None or server_proc.poll() is not None:
-        return
-    server_proc.terminate()
-    try:
-        server_proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        server_proc.kill()
-        server_proc.wait(timeout=5)
-
-
 def run_lm_eval_suite(
-    args: argparse.Namespace,
-    model_slug: str,
+    ctx: ModelContext,
     tokenizer_id: str,
     suite_name: str,
     task_name: str,
     limit: int,
     fewshot: int,
     suite_dir: Path,
-) -> Tuple[Dict[str, float], str, str]:
+) -> Tuple[str, str, List[MetricRow], str]:
     suite_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = suite_dir / "stdout.log"
     stderr_path = suite_dir / "stderr.log"
 
-    base_url = f"http://{args.server_host}:{args.server_port}/v1/completions"
+    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1/completions"
     model_args = ",".join(
         [
-            f"model={model_slug}",
+            f"model={ctx.model_slug}",
             f"base_url={base_url}",
-            f"num_concurrent={args.num_concurrent}",
-            f"max_retries={args.max_retries}",
+            f"num_concurrent={ctx.args.num_concurrent}",
+            f"max_retries={ctx.args.max_retries}",
             "tokenized_requests=False",
-            f"max_length={args.ctx}",
-            f"max_gen_toks={args.max_gen_toks}",
-            f"seed={args.seed}",
+            f"max_length={ctx.args.ctx}",
+            f"max_gen_toks={ctx.args.max_gen_toks}",
+            f"seed={ctx.args.seed}",
         ]
     )
     if tokenizer_id:
         model_args += f",tokenizer={tokenizer_id},tokenizer_backend=huggingface"
 
     cmd = [
-        args.lm_eval_bin,
+        ctx.args.lm_eval_bin,
         "--model",
         "local-completions",
         "--model_args",
@@ -372,7 +334,7 @@ def run_lm_eval_suite(
     ]
 
     started = time.perf_counter()
-    proc = run_logged_command(cmd, stdout_path, stderr_path, timeout_s=args.suite_timeout_s)
+    proc = run_logged_command(cmd, stdout_path, stderr_path, timeout_s=ctx.args.suite_timeout_s)
     runtime_s = time.perf_counter() - started
     if proc.returncode != 0:
         raise BenchmarkError(f"lm-eval failed for {suite_name} (see {stderr_path})")
@@ -380,7 +342,32 @@ def run_lm_eval_suite(
     result_json = find_result_json(suite_dir)
     payload = json.loads(result_json.read_text(encoding="utf-8"))
     metrics = extract_lm_eval_metrics(payload, suite_name)
-    return metrics, f"{runtime_s:.3f}", ""
+
+    metric_rows = []
+    for metric_name, metric_value in sorted(metrics.items()):
+        metric_stderr = ""
+        if metric_name.endswith("_stderr,none"):
+            continue
+        stderr_key = f"{metric_name}_stderr,none"
+        if stderr_key in metrics:
+            metric_stderr = f"{metrics[stderr_key]:.6f}"
+        newRow = MetricRow(
+                timestamp=ctx.ts_slug,
+                model_path=ctx.model_path,
+                model_name=ctx.model_slug,
+                suite=suite_name,
+                task_name=task_name,
+                metric_name=metric_name,
+                metric_value=f"{metric_value:.6f}",
+                metric_stderr=metric_stderr,
+                limit=limit,
+                status="ok",
+                error_note="",
+            )
+        metric_rows.append(newRow)
+
+    primary_name, primary_value = pick_primary_metric(suite_name, metrics)
+    return primary_name, primary_value, metric_rows, f"{runtime_s:.3f}"
 
 
 def create_humaneval_subset(limit: int, output_path: Path) -> None:
@@ -432,26 +419,25 @@ def parse_evalplus_stdout(text: str) -> Dict[str, float]:
 
 
 def run_humaneval_suite(
-    args: argparse.Namespace,
-    model_slug: str,
+    ctx: ModelContext,
     suite_dir: Path,
-) -> Tuple[Dict[str, float], str, str]:
-    ensure_commands_exist([args.evalplus_codegen_bin, args.evalplus_evaluate_bin])
+) -> Tuple[str, str, List[MetricRow], str]:
+    ensure_commands_exist([ctx.args.evalplus_codegen_bin, ctx.args.evalplus_evaluate_bin])
     suite_dir.mkdir(parents=True, exist_ok=True)
     subset_path = suite_dir / "humaneval_subset.jsonl.gz"
-    create_humaneval_subset(args.humaneval_limit, subset_path)
+    create_humaneval_subset(ctx.args.humaneval_limit, subset_path)
 
     env = os.environ.copy()
     env["HUMANEVAL_OVERRIDE_PATH"] = str(subset_path)
     env.setdefault("OPENAI_API_KEY", "local-benchmark")
-    base_url = f"http://{args.server_host}:{args.server_port}/v1"
+    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1"
 
     codegen_stdout = suite_dir / "codegen.stdout.log"
     codegen_stderr = suite_dir / "codegen.stderr.log"
     codegen_cmd = [
-        args.evalplus_codegen_bin,
+        ctx.args.evalplus_codegen_bin,
         "--model",
-        model_slug,
+        ctx.model_slug,
         "--backend",
         "openai",
         "--base-url",
@@ -468,7 +454,7 @@ def run_humaneval_suite(
         codegen_cmd,
         codegen_stdout,
         codegen_stderr,
-        timeout_s=args.suite_timeout_s,
+        timeout_s=ctx.args.suite_timeout_s,
         env=env,
     )
     if codegen_proc.returncode != 0:
@@ -478,7 +464,7 @@ def run_humaneval_suite(
     eval_stdout = suite_dir / "evaluate.stdout.log"
     eval_stderr = suite_dir / "evaluate.stderr.log"
     eval_cmd = [
-        args.evalplus_evaluate_bin,
+        ctx.args.evalplus_evaluate_bin,
         "--dataset",
         "humaneval",
         "--samples",
@@ -489,7 +475,7 @@ def run_humaneval_suite(
         eval_cmd,
         eval_stdout,
         eval_stderr,
-        timeout_s=args.suite_timeout_s,
+        timeout_s=ctx.args.suite_timeout_s,
         env=env,
     )
     runtime_s = time.perf_counter() - started
@@ -497,35 +483,47 @@ def run_humaneval_suite(
         raise BenchmarkError(f"EvalPlus evaluation failed (see {eval_stderr})")
 
     metrics = parse_evalplus_stdout(eval_stdout.read_text(encoding="utf-8"))
-    return metrics, f"{runtime_s:.3f}", ""
+
+    metric_rows = [MetricRow(timestamp=ctx.ts_slug,
+                            model_path=ctx.model_path,
+                            model_name=ctx.model_slug,
+                            suite="humaneval",
+                            task_name="humaneval",
+                            metric_name=metric_name,
+                            metric_value=f"{metric_value:.6f}",
+                            metric_stderr="",
+                            limit=ctx.args.humaneval_limit,
+                            status="ok",
+                            error_note="",
+                        ) for metric_name, metric_value in sorted(metrics.items())]
+    primary_name, primary_value = pick_primary_metric("humaneval", metrics)
+    return primary_name, primary_value, metric_rows, f"{runtime_s:.3f}"
 
 
 def run_external_template_suite(
     suite_name: str,
     template: str,
-    model_path: str,
-    model_slug: str,
-    args: argparse.Namespace,
+    ctx: ModelContext,
     suite_dir: Path,
     limit: int,
-) -> Tuple[Dict[str, float], str, str]:
+) -> Tuple[str, str, List[MetricRow], str]:
     if not template:
         raise BenchmarkError(f"{suite_name} command template was not provided")
 
     suite_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = suite_dir / "stdout.log"
     stderr_path = suite_dir / "stderr.log"
-    base_url = f"http://{args.server_host}:{args.server_port}/v1"
+    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1"
     command_text = template.format(
-        model_name=model_slug,
-        model_path=model_path,
+        model_name=ctx.model_slug,
+        model_path=ctx.model_path,
         base_url=base_url,
-        host=args.server_host,
-        port=args.server_port,
+        host=ctx.args.server_host,
+        port=ctx.args.server_port,
         suite_dir=suite_dir,
         limit=limit,
-        ctx=args.ctx,
-        seed=args.seed,
+        ctx=ctx.args.ctx,
+        seed=ctx.args.seed,
     )
 
     started = time.perf_counter()
@@ -533,7 +531,7 @@ def run_external_template_suite(
         [command_text],
         stdout_path,
         stderr_path,
-        timeout_s=args.suite_timeout_s,
+        timeout_s=ctx.args.suite_timeout_s,
         env=os.environ.copy(),
         shell=True,
     )
@@ -545,7 +543,21 @@ def run_external_template_suite(
     metrics = {name: float(value) for name, value in raw_metrics}
     if not metrics:
         metrics = {"exit_code": 0.0}
-    return metrics, f"{runtime_s:.3f}", ""
+
+    primary_name, primary_value = pick_primary_metric(suite_name, metrics)
+    metric_rows = [MetricRow(timestamp=ctx.ts_slug,
+                            model_path=ctx.model_path,
+                            model_name=ctx.model_slug,
+                            suite=suite_name,
+                            task_name=suite_name,
+                            metric_name=metric_name,
+                            metric_value=f"{metric_value:.6f}",
+                            metric_stderr="",
+                            limit=limit,
+                            status="ok",
+                            error_note="",
+                        ) for metric_name, metric_value in sorted(metrics.items())]
+    return primary_name, primary_value, metric_rows, f"{runtime_s:.3f}"
 
 
 def safe_median(values: List[float]) -> str:
@@ -615,6 +627,156 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def benchmark_model(ctx: ModelContext, model_raw_dir: Path,
+    summary_csv: Path, suite_runs_csv: Path, metrics_csv: Path, tokenizer_map: Dict[str, str]) -> None:
+
+    summary_values: Dict[str, str] = {
+        "gsm8k_primary_metric": "",
+        "mmlu_primary_metric": "",
+        "ifeval_primary_metric": "",
+        "humaneval_plus_pass_at_1": "",
+        "bfcl_primary_metric": "",
+        "aider_primary_metric": "",
+    }
+
+    def getSuiteRunRow(suite: str, limit: int, status: str, runtime_s: str = "", primary_metric_name: str = "", primary_metric_value: str = "", error_note: str = "") -> SuiteRunRow:
+        return SuiteRunRow(
+                        timestamp=ctx.ts_slug,
+                        model_path=ctx.model_path,
+                        model_name=ctx.model_slug,
+                        suite=suite,
+                        limit=limit,
+                        status=status,
+                        runtime_s=runtime_s,
+                        primary_metric_name=primary_metric_name,
+                        primary_metric_value=primary_metric_value,
+                        error_note=error_note,
+                    )
+
+    def run_benchmark_suite(suite_name: str, limit: int, runner: Callable[[], Tuple[str, str, List[MetricRow], str]]) -> Tuple[bool, str]:
+        try:
+            primary_name, primary_value, metrics, runtime_s = runner()
+            append_csv_row(
+                    suite_runs_csv,
+                    SUITE_RUN_FIELDS,
+                    getSuiteRunRow(suite=suite_name, limit=limit, status="ok", runtime_s=runtime_s, primary_metric_name=primary_name, primary_metric_value=primary_value).to_dict(),
+                )
+            for row in metrics:
+                append_csv_row(metrics_csv, METRIC_FIELDS, row.to_dict())
+            print(f"  - {suite_name}: {primary_name}={primary_value}")
+            return True, primary_value
+        except (BenchmarkError, subprocess.SubprocessError, TimeoutError) as exc:
+            model_errors.append(f"{suite_name}: {exc}")
+            append_csv_row(
+                suite_runs_csv,
+                SUITE_RUN_FIELDS,
+                getSuiteRunRow(suite=suite_name, limit=limit, status="failed", error_note=str(exc)).to_dict(),
+            )
+            print(f"  - {suite_name}: ERROR: {exc}")
+            return False, ""
+
+    model_status = "ok"
+    model_errors: List[str] = []
+    try:
+        server_log = model_raw_dir / "server.log"
+        global server_proc
+        server_proc = start_server(
+            ctx.args.llama_server_bin, server_log, model_path, ctx.args.ngl, ctx.args.ctx,
+            ctx.args.server_host, ctx.args.server_port, None, ctx.args.temp, ctx.args.top_p, ctx.args.seed)
+
+        for suite_name, task_name, default_limit, default_fewshot in LM_EVAL_SUITES:
+            limit = getattr(ctx.args, f"{suite_name}_limit", default_limit)
+            fewshot = getattr(ctx.args, f"{suite_name}_fewshot", default_fewshot)
+            suite_dir = model_raw_dir / suite_name
+
+            success, primary_value = run_benchmark_suite(suite_name, limit, lambda: run_lm_eval_suite(
+                ctx=ctx,
+                tokenizer_id=tokenizer_map.get(ctx.model_path, ""),
+                suite_name=suite_name,
+                task_name=task_name,
+                limit=limit,
+                fewshot=fewshot,
+                suite_dir=suite_dir,
+            ))
+            summary_values[f"{suite_name}_primary_metric"] = primary_value
+            if not success:
+                model_status = "partial"
+
+        if ctx.args.run_humaneval:
+            suite_dir = model_raw_dir / "humaneval"
+
+            success, primary_value = run_benchmark_suite(
+                "humaneval", ctx.args.humaneval_limit,lambda: run_humaneval_suite(ctx=ctx, suite_dir=suite_dir))
+            summary_values["humaneval_plus_pass_at_1"] = primary_value
+            if not success:
+                model_status = "partial"
+
+        if ctx.args.bfcl_command_template:
+            suite_dir = model_raw_dir / "bfcl"
+            success, primary_value = run_benchmark_suite("bfcl", ctx.args.bfcl_limit, lambda: run_external_template_suite(
+                suite_name="bfcl",
+                template=ctx.args.bfcl_command_template,
+                ctx=ctx,
+                suite_dir=suite_dir,
+                limit=ctx.args.bfcl_limit,
+            ))
+            summary_values["bfcl_primary_metric"] = primary_value
+            if not success:
+                model_status = "partial"
+
+        if ctx.args.aider_command_template:
+            suite_dir = model_raw_dir / "aider"
+            success, primary_value = run_benchmark_suite("aider", ctx.args.aider_limit, lambda: run_external_template_suite(
+                suite_name="aider",
+                template=ctx.args.aider_command_template,
+                ctx=ctx,
+                suite_dir=suite_dir,
+                limit=ctx.args.aider_limit,
+            ))
+            summary_values["aider_primary_metric"] = primary_value
+            if not success:
+                model_status = "partial"
+
+    except (BenchmarkError, subprocess.SubprocessError, urllib.error.URLError, TimeoutError) as exc:
+        model_status = "failed"
+        model_errors.append(str(exc))
+        print(f"  - ERROR: {exc}")
+    finally:
+        cleanup_server(server_proc)
+        server_proc = None
+        append_csv_row(
+            summary_csv,
+            SUMMARY_FIELDS,
+            SummaryRow(
+                timestamp=ctx.ts_slug,
+                model_path=ctx.model_path,
+                model_name=ctx.model_slug,
+                ctx=ctx.args.ctx,
+                ngl=ctx.args.ngl,
+                temperature=ctx.args.temp,
+                top_p=ctx.args.top_p,
+                seed=ctx.args.seed,
+                gsm8k_primary_metric=summary_values["gsm8k_primary_metric"],
+                mmlu_primary_metric=summary_values["mmlu_primary_metric"],
+                ifeval_primary_metric=summary_values["ifeval_primary_metric"],
+                humaneval_plus_pass_at_1=summary_values["humaneval_plus_pass_at_1"],
+                bfcl_primary_metric=summary_values["bfcl_primary_metric"],
+                aider_primary_metric=summary_values["aider_primary_metric"],
+                status=model_status,
+                error_note=" | ".join(model_errors),
+            ).to_dict(),
+        )
+        print()
+
+server_proc: Optional[subprocess.Popen[str]] = None
+
+@dataclass(frozen=True)
+class ModelContext:
+    args: argparse.Namespace
+    ts_slug: str
+    model_path: str
+    model_slug: str
+
 def main() -> int:
     args = parse_args()
     models_file = Path(args.models_file)
@@ -649,11 +811,8 @@ def main() -> int:
     print(f"Run directory: {run_dir}")
     print()
 
-    server_proc: Optional[subprocess.Popen[str]] = None
-
     def signal_cleanup(*_: object) -> None:
         cleanup_server(server_proc)
-
     signal.signal(signal.SIGINT, signal_cleanup)
     signal.signal(signal.SIGTERM, signal_cleanup)
 
@@ -678,12 +837,6 @@ def main() -> int:
                     temperature=args.temp,
                     top_p=args.top_p,
                     seed=args.seed,
-                    gsm8k_primary_metric="",
-                    mmlu_primary_metric="",
-                    ifeval_primary_metric="",
-                    humaneval_plus_pass_at_1="",
-                    bfcl_primary_metric="",
-                    aider_primary_metric="",
                     status="failed",
                     error_note=err,
                 ).to_dict(),
@@ -691,335 +844,8 @@ def main() -> int:
             print(f"  - ERROR: {err}")
             print()
             continue
-
-        summary_values: Dict[str, str] = {
-            "gsm8k_primary_metric": "",
-            "mmlu_primary_metric": "",
-            "ifeval_primary_metric": "",
-            "humaneval_plus_pass_at_1": "",
-            "bfcl_primary_metric": "",
-            "aider_primary_metric": "",
-        }
-        model_status = "ok"
-        model_errors: List[str] = []
-
-        try:
-            server_log = model_raw_dir / "server.log"
-            server_proc = start_server(args, model_path, server_log)
-            if not wait_for_health(args.server_host, args.server_port, timeout_s=180):
-                raise BenchmarkError("llama-server did not become ready")
-
-            for suite_name, task_name, default_limit, default_fewshot in LM_EVAL_SUITES:
-                limit = getattr(args, f"{suite_name}_limit", default_limit)
-                fewshot = getattr(args, f"{suite_name}_fewshot", default_fewshot)
-                suite_dir = model_raw_dir / suite_name
-                try:
-                    metrics, runtime_s, _ = run_lm_eval_suite(
-                        args=args,
-                        model_slug=model_slug,
-                        tokenizer_id=tokenizer_map.get(model_path, ""),
-                        suite_name=suite_name,
-                        task_name=task_name,
-                        limit=limit,
-                        fewshot=fewshot,
-                        suite_dir=suite_dir,
-                    )
-                    primary_name, primary_value = pick_primary_metric(suite_name, metrics)
-                    summary_values[f"{suite_name}_primary_metric"] = primary_value
-                    append_csv_row(
-                        suite_runs_csv,
-                        SUITE_RUN_FIELDS,
-                        SuiteRunRow(
-                            timestamp=ts_slug,
-                            model_path=model_path,
-                            model_name=model_slug,
-                            suite=suite_name,
-                            limit=limit,
-                            status="ok",
-                            runtime_s=runtime_s,
-                            primary_metric_name=primary_name,
-                            primary_metric_value=primary_value,
-                            error_note="",
-                        ).to_dict(),
-                    )
-                    for metric_name, metric_value in sorted(metrics.items()):
-                        metric_stderr = ""
-                        if metric_name.endswith("_stderr,none"):
-                            continue
-                        stderr_key = f"{metric_name}_stderr,none"
-                        if stderr_key in metrics:
-                            metric_stderr = f"{metrics[stderr_key]:.6f}"
-                        append_csv_row(
-                            metrics_csv,
-                            METRIC_FIELDS,
-                            MetricRow(
-                                timestamp=ts_slug,
-                                model_path=model_path,
-                                model_name=model_slug,
-                                suite=suite_name,
-                                task_name=task_name,
-                                metric_name=metric_name,
-                                metric_value=f"{metric_value:.6f}",
-                                metric_stderr=metric_stderr,
-                                limit=limit,
-                                status="ok",
-                                error_note="",
-                            ).to_dict(),
-                        )
-                    print(f"  - {suite_name}: {primary_name}={primary_value}")
-                except (BenchmarkError, subprocess.SubprocessError, TimeoutError) as exc:
-                    model_status = "partial"
-                    model_errors.append(f"{suite_name}: {exc}")
-                    append_csv_row(
-                        suite_runs_csv,
-                        SUITE_RUN_FIELDS,
-                        SuiteRunRow(
-                            timestamp=ts_slug,
-                            model_path=model_path,
-                            model_name=model_slug,
-                            suite=suite_name,
-                            limit=limit,
-                            status="failed",
-                            runtime_s="",
-                            primary_metric_name="",
-                            primary_metric_value="",
-                            error_note=str(exc),
-                        ).to_dict(),
-                    )
-                    print(f"  - {suite_name}: ERROR: {exc}")
-
-            if args.run_humaneval:
-                try:
-                    suite_dir = model_raw_dir / "humaneval"
-                    metrics, runtime_s, _ = run_humaneval_suite(args, model_slug, suite_dir)
-                    primary_name, primary_value = pick_primary_metric("humaneval", metrics)
-                    summary_values["humaneval_plus_pass_at_1"] = primary_value
-                    append_csv_row(
-                        suite_runs_csv,
-                        SUITE_RUN_FIELDS,
-                        SuiteRunRow(
-                            timestamp=ts_slug,
-                            model_path=model_path,
-                            model_name=model_slug,
-                            suite="humaneval",
-                            limit=args.humaneval_limit,
-                            status="ok",
-                            runtime_s=runtime_s,
-                            primary_metric_name=primary_name,
-                            primary_metric_value=primary_value,
-                            error_note="",
-                        ).to_dict(),
-                    )
-                    for metric_name, metric_value in sorted(metrics.items()):
-                        append_csv_row(
-                            metrics_csv,
-                            METRIC_FIELDS,
-                            MetricRow(
-                                timestamp=ts_slug,
-                                model_path=model_path,
-                                model_name=model_slug,
-                                suite="humaneval",
-                                task_name="humaneval",
-                                metric_name=metric_name,
-                                metric_value=f"{metric_value:.6f}",
-                                metric_stderr="",
-                                limit=args.humaneval_limit,
-                                status="ok",
-                                error_note="",
-                            ).to_dict(),
-                        )
-                    print(f"  - humaneval: {primary_name}={primary_value}")
-                except (BenchmarkError, subprocess.SubprocessError, TimeoutError) as exc:
-                    model_status = "partial"
-                    model_errors.append(f"humaneval: {exc}")
-                    append_csv_row(
-                        suite_runs_csv,
-                        SUITE_RUN_FIELDS,
-                        SuiteRunRow(
-                            timestamp=ts_slug,
-                            model_path=model_path,
-                            model_name=model_slug,
-                            suite="humaneval",
-                            limit=args.humaneval_limit,
-                            status="failed",
-                            runtime_s="",
-                            primary_metric_name="",
-                            primary_metric_value="",
-                            error_note=str(exc),
-                        ).to_dict(),
-                    )
-                    print(f"  - humaneval: ERROR: {exc}")
-
-            if args.bfcl_command_template:
-                try:
-                    suite_dir = model_raw_dir / "bfcl"
-                    metrics, runtime_s, _ = run_external_template_suite(
-                        suite_name="bfcl",
-                        template=args.bfcl_command_template,
-                        model_path=model_path,
-                        model_slug=model_slug,
-                        args=args,
-                        suite_dir=suite_dir,
-                        limit=args.bfcl_limit,
-                    )
-                    primary_name, primary_value = pick_primary_metric("bfcl", metrics)
-                    summary_values["bfcl_primary_metric"] = primary_value
-                    append_csv_row(
-                        suite_runs_csv,
-                        SUITE_RUN_FIELDS,
-                        SuiteRunRow(
-                            timestamp=ts_slug,
-                            model_path=model_path,
-                            model_name=model_slug,
-                            suite="bfcl",
-                            limit=args.bfcl_limit,
-                            status="ok",
-                            runtime_s=runtime_s,
-                            primary_metric_name=primary_name,
-                            primary_metric_value=primary_value,
-                            error_note="",
-                        ).to_dict(),
-                    )
-                    for metric_name, metric_value in sorted(metrics.items()):
-                        append_csv_row(
-                            metrics_csv,
-                            METRIC_FIELDS,
-                            MetricRow(
-                                timestamp=ts_slug,
-                                model_path=model_path,
-                                model_name=model_slug,
-                                suite="bfcl",
-                                task_name="bfcl",
-                                metric_name=metric_name,
-                                metric_value=f"{metric_value:.6f}",
-                                metric_stderr="",
-                                limit=args.bfcl_limit,
-                                status="ok",
-                                error_note="",
-                            ).to_dict(),
-                        )
-                    print(f"  - bfcl: {primary_name}={primary_value}")
-                except (BenchmarkError, subprocess.SubprocessError, TimeoutError) as exc:
-                    model_status = "partial"
-                    model_errors.append(f"bfcl: {exc}")
-                    append_csv_row(
-                        suite_runs_csv,
-                        SUITE_RUN_FIELDS,
-                        SuiteRunRow(
-                            timestamp=ts_slug,
-                            model_path=model_path,
-                            model_name=model_slug,
-                            suite="bfcl",
-                            limit=args.bfcl_limit,
-                            status="failed",
-                            runtime_s="",
-                            primary_metric_name="",
-                            primary_metric_value="",
-                            error_note=str(exc),
-                        ).to_dict(),
-                    )
-                    print(f"  - bfcl: ERROR: {exc}")
-
-            if args.aider_command_template:
-                try:
-                    suite_dir = model_raw_dir / "aider"
-                    metrics, runtime_s, _ = run_external_template_suite(
-                        suite_name="aider",
-                        template=args.aider_command_template,
-                        model_path=model_path,
-                        model_slug=model_slug,
-                        args=args,
-                        suite_dir=suite_dir,
-                        limit=args.aider_limit,
-                    )
-                    primary_name, primary_value = pick_primary_metric("aider", metrics)
-                    summary_values["aider_primary_metric"] = primary_value
-                    append_csv_row(
-                        suite_runs_csv,
-                        SUITE_RUN_FIELDS,
-                        SuiteRunRow(
-                            timestamp=ts_slug,
-                            model_path=model_path,
-                            model_name=model_slug,
-                            suite="aider",
-                            limit=args.aider_limit,
-                            status="ok",
-                            runtime_s=runtime_s,
-                            primary_metric_name=primary_name,
-                            primary_metric_value=primary_value,
-                            error_note="",
-                        ).to_dict(),
-                    )
-                    for metric_name, metric_value in sorted(metrics.items()):
-                        append_csv_row(
-                            metrics_csv,
-                            METRIC_FIELDS,
-                            MetricRow(
-                                timestamp=ts_slug,
-                                model_path=model_path,
-                                model_name=model_slug,
-                                suite="aider",
-                                task_name="aider",
-                                metric_name=metric_name,
-                                metric_value=f"{metric_value:.6f}",
-                                metric_stderr="",
-                                limit=args.aider_limit,
-                                status="ok",
-                                error_note="",
-                            ).to_dict(),
-                        )
-                    print(f"  - aider: {primary_name}={primary_value}")
-                except (BenchmarkError, subprocess.SubprocessError, TimeoutError) as exc:
-                    model_status = "partial"
-                    model_errors.append(f"aider: {exc}")
-                    append_csv_row(
-                        suite_runs_csv,
-                        SUITE_RUN_FIELDS,
-                        SuiteRunRow(
-                            timestamp=ts_slug,
-                            model_path=model_path,
-                            model_name=model_slug,
-                            suite="aider",
-                            limit=args.aider_limit,
-                            status="failed",
-                            runtime_s="",
-                            primary_metric_name="",
-                            primary_metric_value="",
-                            error_note=str(exc),
-                        ).to_dict(),
-                    )
-                    print(f"  - aider: ERROR: {exc}")
-
-        except (BenchmarkError, subprocess.SubprocessError, urllib.error.URLError, TimeoutError) as exc:
-            model_status = "failed"
-            model_errors.append(str(exc))
-            print(f"  - ERROR: {exc}")
-        finally:
-            cleanup_server(server_proc)
-            server_proc = None
-            append_csv_row(
-                summary_csv,
-                SUMMARY_FIELDS,
-                SummaryRow(
-                    timestamp=ts_slug,
-                    model_path=model_path,
-                    model_name=model_slug,
-                    ctx=args.ctx,
-                    ngl=args.ngl,
-                    temperature=args.temp,
-                    top_p=args.top_p,
-                    seed=args.seed,
-                    gsm8k_primary_metric=summary_values["gsm8k_primary_metric"],
-                    mmlu_primary_metric=summary_values["mmlu_primary_metric"],
-                    ifeval_primary_metric=summary_values["ifeval_primary_metric"],
-                    humaneval_plus_pass_at_1=summary_values["humaneval_plus_pass_at_1"],
-                    bfcl_primary_metric=summary_values["bfcl_primary_metric"],
-                    aider_primary_metric=summary_values["aider_primary_metric"],
-                    status=model_status,
-                    error_note=" | ".join(model_errors),
-                ).to_dict(),
-            )
-            print()
+        context = ModelContext(args=args, ts_slug=ts_slug, model_path=model_path, model_slug=model_slug)
+        benchmark_model(context, model_raw_dir, summary_csv, suite_runs_csv, metrics_csv, tokenizer_map)
 
     print("Done.")
     print(f"Summary CSV: {summary_csv}")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass, fields
+from functools import partial
 import json
 import os
 import signal
@@ -25,7 +26,8 @@ from common import (
     ensure_commands_exist,
     write_csv,
     append_csv_row,
-    wait_for_health
+    start_server,
+    cleanup_server
 )
 
 
@@ -108,7 +110,6 @@ class LatencyResultRow(TypedDict):
     e2e_ms: float
     output_tokens: int
     status: str
-
 
 
 def parse_prompts_file(path: Path) -> Dict[str, str]:
@@ -390,20 +391,12 @@ def main() -> int:
 
     model_count = 0
     ok_count = 0
+
     server_proc: Optional[subprocess.Popen[str]] = None
-
-    def cleanup_server(*_: object) -> None:
-        nonlocal server_proc
-        if server_proc is not None and server_proc.poll() is None:
-            server_proc.terminate()
-            try:
-                server_proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                server_proc.kill()
-                server_proc.wait(timeout=5)
-
-    signal.signal(signal.SIGINT, cleanup_server)
-    signal.signal(signal.SIGTERM, cleanup_server)
+    def signal_cleanup(*_: object) -> None:
+        cleanup_server(server_proc)
+    signal.signal(signal.SIGINT, signal_cleanup)
+    signal.signal(signal.SIGTERM, signal_cleanup)
 
     for model_path in models:
         model_count += 1
@@ -456,29 +449,10 @@ def main() -> int:
             )
 
             server_log = model_raw_dir / "server.log"
-            server_cmd = [
-                args.llama_server_bin,
-                "-m",
-                model_path,
-                "-ngl",
-                str(args.ngl),
-                "-c",
-                str(args.ctx),
-                "--reasoning",
-                "off",
-                "--host",
-                args.server_host,
-                "--port",
-                str(args.server_port),
-            ]
-            if args.bench_threads is not None:
-                server_cmd.extend(["-t", str(args.bench_threads)])
-
-            with server_log.open("w", encoding="utf-8") as logf:
-                server_proc = subprocess.Popen(server_cmd, stdout=logf, stderr=subprocess.STDOUT, text=True)
-
-            if not wait_for_health(args.server_host, args.server_port, timeout_s=180):
-                raise BenchmarkError("llama-server did not become ready")
+            
+            server_proc = start_server(
+                args.llama_server_bin, server_log, model_path, args.ngl, args.ctx,
+                args.server_host, args.server_port, args.bench_threads, None, None, None)
 
             rows, medians = run_latency_suite(
                 args.server_host,
@@ -562,7 +536,7 @@ def main() -> int:
             )
             print(f"  - ERROR: {exc}")
         finally:
-            cleanup_server()
+            cleanup_server(server_proc)
             server_proc = None
             print()
 
