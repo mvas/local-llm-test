@@ -39,6 +39,7 @@ def pick_primary_metric(suite_name: str, metrics: Dict[str, float]) -> Tuple[str
             "prompt_level_loose_acc,none",
         ],
         "humaneval": ["plus.pass@1", "base.pass@1"],
+        "mbpp": ["plus.pass@1", "base.pass@1"],
         "bfcl": ["score", "accuracy", "pass@1"],
         "aider": ["score", "pass_rate", "success_rate"],
     }

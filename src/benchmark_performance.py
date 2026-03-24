@@ -28,7 +28,7 @@ from common import (
     Metric,
     ModelContext,
 )
-from suite_evalplus import run_humaneval_suite
+from suite_evalplus import run_humaneval, run_humaneval_suite, run_mbpp
 from suite_lm_eval import run_lm_eval_suite
 from suite_templated import run_external_template_suite
 
@@ -42,11 +42,9 @@ DEFAULTS = {
     "server_host": "127.0.0.1",
     "server_port": 8082,
     "out_dir_base": "results/performance",
-    "evalplus_codegen_bin": os.environ.get("EVALPLUS_CODEGEN_BIN", "evalplus.codegen"),
-    "evalplus_evaluate_bin": os.environ.get("EVALPLUS_EVALUATE_BIN", "evalplus.evaluate"),
     # Quick-suite defaults sized to keep the total runtime reasonable on local hardware.
-    "humaneval_limit": 20,
     "run_humaneval": False,
+    "run_mbpp": False,
     "run_bfcl": False,
     "run_aider": False,
     "run_lm_evals": False,
@@ -160,6 +158,7 @@ class Summary:
     mmlu_primary_metric: str = ""
     ifeval_primary_metric: str = ""
     humaneval_plus_pass_at_1: str = ""
+    mbpp_plus_pass_at_1: str = ""
     bfcl_primary_metric: str = ""
     aider_primary_metric: str = ""
     status: str = ""
@@ -181,10 +180,10 @@ class SuiteRun:
     suite: str
     limit: int
     status: str
-    runtime_s: str
-    primary_metric_name: str
-    primary_metric_value: str
-    error_note: str
+    runtime_s: str = ""
+    primary_metric_name: str = ""
+    primary_metric_value: str = ""
+    error_note: str = ""
 
     @classmethod
     def headers(cls) -> List[str]:
@@ -231,10 +230,10 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"default_seed={args.default_seed}",
         f"server_host={args.server_host}",
         f"server_port={args.server_port}",
-        f"evalplus_codegen_bin={args.evalplus_codegen_bin}",
-        f"evalplus_evaluate_bin={args.evalplus_evaluate_bin}",
         f"humaneval_limit={args.humaneval_limit}",
+        f"mbpp_limit={args.mbpp_limit}",
         f"run_humaneval={args.run_humaneval}",
+        f"run_mbpp={args.run_mbpp}",
         f"run_lm_evals={args.run_lm_evals}",
         f"full_mode={args.full_mode}",
         # f"bfcl_command_template={args.bfcl_command_template or ''}",
@@ -265,8 +264,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--default-seed", type=int, default=DEFAULTS["seed"])
     parser.add_argument("--server-host", default=DEFAULTS["server_host"])
     parser.add_argument("--server-port", type=int, default=DEFAULTS["server_port"])
-    parser.add_argument("--evalplus-codegen-bin", default=DEFAULTS["evalplus_codegen_bin"])
-    parser.add_argument("--evalplus-evaluate-bin", default=DEFAULTS["evalplus_evaluate_bin"])
     parser.add_argument("--full-mode", action=argparse.BooleanOptionalAction, default=DEFAULTS["full_mode"])
     parser.add_argument(
         "--run-lm-evals",
@@ -280,7 +277,14 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULTS["run_humaneval"],
         help="Run EvalPlus HumanEval+ subset if EvalPlus is installed.",
     )
-    parser.add_argument("--humaneval-limit", type=int, default=DEFAULTS["humaneval_limit"])
+    parser.add_argument("--humaneval-limit", type=int, default=20)
+    parser.add_argument(
+        "--run-mbpp",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULTS["run_mbpp"],
+        help="Run EvalPlus MBPP+ subset if EvalPlus is installed.",
+    )
+    parser.add_argument("--mbpp-limit", type=int, default=20)
     parser.add_argument(
         "--run-bfcl",
         action=argparse.BooleanOptionalAction,
@@ -368,29 +372,6 @@ def _get_lm_eval_cmd(suite_config: dict, ctx: ModelContext, tokenizer_id: str) -
 def _benchmark_model(ctx: ModelContext,
     summary_csv: Path, suite_runs_csv: Path, metrics_csv: Path, tokenizer_map: Dict[str, str]) -> None:
 
-    summary_values: Dict[str, str] = {
-        "gsm8k_primary_metric": "",
-        "mmlu_primary_metric": "",
-        "ifeval_primary_metric": "",
-        "humaneval_plus_pass_at_1": "",
-        "bfcl_primary_metric": "",
-        "aider_primary_metric": "",
-    }
-
-    def getSuiteRunRow(suite: str, limit: int, status: str, runtime_s: str = "", primary_metric_name: str = "", primary_metric_value: str = "", error_note: str = "") -> SuiteRun:
-        return SuiteRun(
-                        timestamp=ctx.ts_slug,
-                        model_path=ctx.model_path,
-                        model_name=ctx.model_slug,
-                        suite=suite,
-                        limit=limit,
-                        status=status,
-                        runtime_s=runtime_s,
-                        primary_metric_name=primary_metric_name,
-                        primary_metric_value=primary_metric_value,
-                        error_note=error_note,
-                    )
-
     def run_benchmark_suite(suite_name: str, limit: int, runner: Callable[[], Tuple[str, str, List[Metric], str]]) -> Tuple[bool, str]:
         print(f"  - Running {suite_name} (limit={limit})", end=". ", flush=True)
         try:
@@ -398,7 +379,17 @@ def _benchmark_model(ctx: ModelContext,
             append_csv_row(
                     suite_runs_csv,
                     SUITE_RUN_FIELDS,
-                    getSuiteRunRow(suite=suite_name, limit=limit, status="ok", runtime_s=runtime_s, primary_metric_name=primary_name, primary_metric_value=primary_value).to_dict(),
+                    SuiteRun(
+                        timestamp=ctx.ts_slug,
+                        model_path=ctx.model_path,
+                        model_name=ctx.model_slug,
+                        suite=suite_name,
+                        limit=limit,
+                        status="ok",
+                        runtime_s=runtime_s,
+                        primary_metric_name=primary_name,
+                        primary_metric_value=primary_value,
+                    ).to_dict(),
                 )
             for row in metrics:
                 append_csv_row(metrics_csv, METRIC_FIELDS, row.to_dict())
@@ -409,10 +400,28 @@ def _benchmark_model(ctx: ModelContext,
             append_csv_row(
                 suite_runs_csv,
                 SUITE_RUN_FIELDS,
-                getSuiteRunRow(suite=suite_name, limit=limit, status="failed", error_note=str(exc)).to_dict(),
+                SuiteRun(
+                    timestamp=ctx.ts_slug,
+                    model_path=ctx.model_path,
+                    model_name=ctx.model_slug,
+                    suite=suite_name,
+                    limit=limit,
+                    status="failed",
+                    error_note=str(exc),
+                ).to_dict(),
             )
             print(f"ERROR: {exc}")
             return False, ""
+
+    summary_values: Dict[str, str] = {
+        "gsm8k_primary_metric": "",
+        "mmlu_primary_metric": "",
+        "ifeval_primary_metric": "",
+        "humaneval_plus_pass_at_1": "",
+        "mbpp_plus_pass_at_1": "",
+        "bfcl_primary_metric": "",
+        "aider_primary_metric": "",
+    }
 
     model_status = "ok"
     model_errors: List[str] = []
@@ -425,13 +434,10 @@ def _benchmark_model(ctx: ModelContext,
             ctx.args.server_host, ctx.args.server_port, None,
             ctx.args.default_temp, ctx.args.default_top_p, ctx.args.default_seed)
 
+        # Run LM-Eval suites
         if ctx.args.run_lm_evals:
             suites = config_full if ctx.args.full_mode else config_fast
             for suite_name, suite_config in suites.items():
-                # Run GSM8K
-                # suite_name = "gsm8k"
-                # suite_name = "mmlu"
-                # suite_name = "ifeval"
                 cmd = _get_lm_eval_cmd(suite_config, ctx, tokenizer_id)
                 limit = suite_config.get("limit", 0)
 
@@ -444,8 +450,16 @@ def _benchmark_model(ctx: ModelContext,
         # Run EvalPlus HumanEval+ subset
         if ctx.args.run_humaneval:
             success, primary_value = run_benchmark_suite(
-                "humaneval", ctx.args.humaneval_limit, lambda: run_humaneval_suite(ctx=ctx))
+                "humaneval", ctx.args.humaneval_limit, lambda: run_humaneval(ctx=ctx))
             summary_values["humaneval_plus_pass_at_1"] = primary_value
+            if not success:
+                model_status = "partial"
+
+        # Run EvalPlus MBPP+ subset
+        if ctx.args.run_mbpp:
+            success, primary_value = run_benchmark_suite(
+                "mbpp", ctx.args.mbpp_limit, lambda: run_mbpp(ctx=ctx))
+            summary_values["mbpp_plus_pass_at_1"] = primary_value
             if not success:
                 model_status = "partial"
 
@@ -496,6 +510,7 @@ def _benchmark_model(ctx: ModelContext,
                 mmlu_primary_metric=summary_values["mmlu_primary_metric"],
                 ifeval_primary_metric=summary_values["ifeval_primary_metric"],
                 humaneval_plus_pass_at_1=summary_values["humaneval_plus_pass_at_1"],
+                mbpp_plus_pass_at_1=summary_values["mbpp_plus_pass_at_1"],
                 bfcl_primary_metric=summary_values["bfcl_primary_metric"],
                 aider_primary_metric=summary_values["aider_primary_metric"],
                 status=model_status,

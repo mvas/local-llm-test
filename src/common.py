@@ -18,6 +18,8 @@ LM_EVAL_BIN = "lm_eval"
 LLAMA_SERVER_BIN = "llama-server"
 LLAMA_BENCH_BIN = "llama-bench"
 SUITE_TIMEOUT = 3600
+EVALPLUS_CODEGEN_BIN = "evalplus.codegen"
+EVALPLUS_EVALUATE_BIN = "evalplus.evaluate"
 
 
 class BenchmarkError(RuntimeError):
