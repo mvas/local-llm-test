@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, TypedDict
 
 from common import ( 
+    LLAMA_BENCH_BIN,
+    LLAMA_SERVER_BIN,
     now_iso,
     timestamp_slug,
     slugify_model,
@@ -26,7 +28,7 @@ from common import (
     ensure_commands_exist,
     write_csv,
     append_csv_row,
-    start_server,
+    start_llama_server,
     cleanup_server
 )
 
@@ -46,8 +48,6 @@ DEFAULTS = {
     "server_port": 8081,
     "prompts_file": "models/prompts.txt",
     "out_dir_base": "results/speed",
-    "llama_bench_bin": os.environ.get("LLAMA_BENCH_BIN", "llama-bench"),
-    "llama_server_bin": os.environ.get("LLAMA_SERVER_BIN", "llama-server"),
 }
 
 
@@ -134,7 +134,6 @@ def parse_prompts_file(path: Path) -> Dict[str, str]:
 
 
 def run_llama_bench(
-    llama_bench_bin: str,
     model_path: str,
     model_raw_dir: Path,
     ngl: int,
@@ -147,7 +146,7 @@ def run_llama_bench(
     bench_stderr = model_raw_dir / "bench.stderr.log"
 
     cmd = [
-        llama_bench_bin,
+        LLAMA_BENCH_BIN,
         # GGUF model file to benchmark
         "-m",
         model_path,
@@ -322,8 +321,6 @@ def write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str])
         f"bench_input_tokens={args.bench_input_tokens}",
         f"bench_output_tokens={args.bench_output_tokens}",
         f"bench_repetitions={args.bench_repetitions}",
-        f"llama_bench_bin={args.llama_bench_bin}",
-        f"llama_server_bin={args.llama_server_bin}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -353,8 +350,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--bench-repetitions", type=int, default=DEFAULTS["bench_repetitions"])
     p.add_argument("--server-host", default=DEFAULTS["server_host"])
     p.add_argument("--server-port", type=int, default=DEFAULTS["server_port"])
-    p.add_argument("--llama-bench-bin", default=DEFAULTS["llama_bench_bin"])
-    p.add_argument("--llama-server-bin", default=DEFAULTS["llama_server_bin"])
     return p.parse_args()
 
 
@@ -368,7 +363,7 @@ def main() -> int:
     if not prompts_file.is_file():
         raise BenchmarkError(f"prompts file not found: {prompts_file}")
 
-    ensure_commands_exist([args.llama_bench_bin, args.llama_server_bin])
+    ensure_commands_exist([LLAMA_BENCH_BIN, LLAMA_SERVER_BIN])
     prompts = parse_prompts_file(prompts_file)
     models = read_models_file(models_file)
     if not models:
@@ -438,7 +433,6 @@ def main() -> int:
         decode_toks = 0.0
         try:
             prompt_toks, decode_toks = run_llama_bench(
-                args.llama_bench_bin,
                 model_path,
                 model_raw_dir,
                 ngl=args.ngl,
@@ -450,8 +444,8 @@ def main() -> int:
 
             server_log = model_raw_dir / "server.log"
             
-            server_proc = start_server(
-                args.llama_server_bin, server_log, model_path, args.ngl, args.ctx,
+            server_proc = start_llama_server(
+                server_log, model_path, args.ngl, args.ctx,
                 args.server_host, args.server_port, args.bench_threads, None, None, None)
 
             rows, medians = run_latency_suite(

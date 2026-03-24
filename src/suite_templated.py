@@ -1,9 +1,8 @@
 import os
-from pathlib import Path
 import re
 import time
 from typing import List, Tuple
-from common import BenchmarkError, Metric, ModelContext
+from common import SUITE_TIMEOUT, BenchmarkError, Metric, ModelContext
 from suite_common import pick_primary_metric, run_logged_command
 
 
@@ -31,7 +30,7 @@ def run_external_template_suite(
         suite_dir=suite_dir,
         limit=limit,
         ctx=ctx.args.ctx,
-        seed=ctx.args.seed,
+        seed=ctx.args.default_seed,
     )
 
     started = time.perf_counter()
@@ -39,7 +38,7 @@ def run_external_template_suite(
         [command_text],
         stdout_path,
         stderr_path,
-        timeout_s=ctx.args.suite_timeout_s,
+        timeout_s=SUITE_TIMEOUT,
         env=os.environ.copy(),
         shell=True,
     )

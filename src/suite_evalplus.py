@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import time
 from typing import Dict, List, Tuple
-from common import BenchmarkError, Metric, ModelContext, ensure_commands_exist
+from common import SUITE_TIMEOUT, BenchmarkError, Metric, ModelContext, ensure_commands_exist
 from suite_common import pick_primary_metric, run_logged_command
 
 
@@ -97,7 +97,7 @@ def run_humaneval_suite(
         codegen_cmd,
         codegen_stdout,
         codegen_stderr,
-        timeout_s=ctx.args.suite_timeout_s,
+        timeout_s=SUITE_TIMEOUT,
         env=env,
     )
     if codegen_proc.returncode != 0:
@@ -118,7 +118,7 @@ def run_humaneval_suite(
         eval_cmd,
         eval_stdout,
         eval_stderr,
-        timeout_s=ctx.args.suite_timeout_s,
+        timeout_s=SUITE_TIMEOUT,
         env=env,
     )
     runtime_s = time.perf_counter() - started

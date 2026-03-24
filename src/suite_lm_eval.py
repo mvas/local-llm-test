@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import time
 from typing import Dict, List, Tuple
-from common import BenchmarkError, Metric, ModelContext
+from common import SUITE_TIMEOUT, BenchmarkError, Metric, ModelContext
 from suite_common import pick_primary_metric, run_logged_command
 
 
@@ -58,50 +58,20 @@ def _find_result_payload(root: Path) -> Dict[str, object]:
 
 def run_lm_eval_suite(
     ctx: ModelContext,
-    tokenizer_id: str,
     suite_name: str,
     limit: int,
-    fewshot: int,
+    cmd: List[str],
 ) -> Tuple[str, str, List[Metric], str]:
+
     suite_dir = ctx.model_raw_dir / suite_name
     suite_dir.mkdir(parents=True, exist_ok=True)
     stdout_path = suite_dir / "stdout.log"
     stderr_path = suite_dir / "stderr.log"
 
-    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1/completions"
-    model_args = ",".join(
-        [
-            f"model={ctx.model_slug}",
-            f"base_url={base_url}",
-            f"num_concurrent={ctx.args.num_concurrent}",
-            f"max_retries={ctx.args.max_retries}",
-            "tokenized_requests=False",
-            f"max_length={ctx.args.ctx}",
-            f"max_gen_toks={ctx.args.max_gen_toks}",
-            f"seed={ctx.args.seed}",
-        ]
-    )
-    if tokenizer_id:
-        model_args += f",tokenizer={tokenizer_id},tokenizer_backend=huggingface"
-
-    cmd = [
-        ctx.args.lm_eval_bin,
-        "--model",
-        "local-completions",
-        "--model_args",
-        model_args,
-        "--tasks",
-        suite_name,
-        "--num_fewshot",
-        str(fewshot),
-        "--limit",
-        str(limit),
-        "--output_path",
-        str(suite_dir),
-    ]
+    cmd.extend(["--output_path", str(suite_dir)])
 
     started = time.perf_counter()
-    proc = run_logged_command(cmd, stdout_path, stderr_path, timeout_s=ctx.args.suite_timeout_s)
+    proc = run_logged_command(cmd, stdout_path, stderr_path, timeout_s=SUITE_TIMEOUT)
     runtime_s = time.perf_counter() - started
     if proc.returncode != 0:
         raise BenchmarkError(f"lm-eval failed for {suite_name} (see {stderr_path})")
@@ -111,12 +81,10 @@ def run_lm_eval_suite(
 
     metric_rows = []
     for metric_name, metric_value in sorted(metrics.items()):
-        metric_stderr = ""
         if metric_name.endswith("_stderr,none"):
             continue
-        stderr_key = f"{metric_name}_stderr,none"
-        if stderr_key in metrics:
-            metric_stderr = f"{metrics[stderr_key]:.6f}"
+        error_key = f"{metric_name}_stderr,none"
+        metric_error = f"{metrics[error_key]:.6f}" if error_key in metrics else ""
         newRow = Metric(
                 timestamp=ctx.ts_slug,
                 model_path=ctx.model_path,
@@ -124,7 +92,7 @@ def run_lm_eval_suite(
                 suite=suite_name,
                 metric_name=metric_name,
                 metric_value=f"{metric_value:.6f}",
-                metric_stderr=metric_stderr,
+                metric_stderr=metric_error,
                 limit=limit,
                 status="ok",
                 error_note="",

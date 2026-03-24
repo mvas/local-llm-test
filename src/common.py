@@ -14,6 +14,12 @@ import urllib.request
 from typing import Dict, Iterable, List, Optional
 
 
+LM_EVAL_BIN = "lm_eval"
+LLAMA_SERVER_BIN = "llama-server"
+LLAMA_BENCH_BIN = "llama-bench"
+SUITE_TIMEOUT = 3600
+
+
 class BenchmarkError(RuntimeError):
     pass
 
@@ -94,8 +100,7 @@ def append_csv_row(path: Path, headers: List[str], row: Dict[str, object]) -> No
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writerow(row)
 
-def start_server(
-    llama_server_bin: str,
+def start_llama_server(
     server_log: Path,
     model_path: str,
     ngl: int,
@@ -107,7 +112,7 @@ def start_server(
     top_p: Optional[float],
     seed: Optional[int]) -> subprocess.Popen[str]:
     cmd = [
-        llama_server_bin,
+        LLAMA_SERVER_BIN,
         "-m",
         model_path,
         "-ngl",
@@ -123,11 +128,11 @@ def start_server(
     ]
     if threads is not None:
         cmd.extend(["-t", str(threads)])
-    if threads is not None:
+    if temp is not None:
         cmd.extend(["--temp", str(temp)])
-    if threads is not None:
+    if top_p is not None:
         cmd.extend(["--top-p", str(top_p)])
-    if threads is not None:
+    if seed is not None:
         cmd.extend(["--seed", str(seed)])
 
     with server_log.open("w", encoding="utf-8") as log_handle:

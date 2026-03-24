@@ -6,13 +6,14 @@ from dataclasses import asdict, dataclass, fields
 import os
 from pathlib import Path
 import signal
-import statistics
 import subprocess
 import sys
 import urllib.error
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, cast
 
-from common import ( 
+from common import (
+    LLAMA_SERVER_BIN,
+    LM_EVAL_BIN,
     now_iso,
     timestamp_slug,
     slugify_model,
@@ -22,7 +23,7 @@ from common import (
     ensure_commands_exist,
     write_csv,
     append_csv_row,
-    start_server,
+    start_llama_server,
     cleanup_server,
     Metric,
     ModelContext,
@@ -38,36 +39,112 @@ DEFAULTS = {
     "temp": 0.0,
     "top_p": 1.0,
     "seed": 1234,
-    "max_gen_toks": 512,
-    "num_concurrent": 1,
-    "max_retries": 3,
-    "suite_timeout_s": 3600,
     "server_host": "127.0.0.1",
     "server_port": 8082,
     "out_dir_base": "results/performance",
-    "llama_server_bin": os.environ.get("LLAMA_SERVER_BIN", "llama-server"),
-    "lm_eval_bin": os.environ.get("LM_EVAL_BIN", "lm_eval"),
     "evalplus_codegen_bin": os.environ.get("EVALPLUS_CODEGEN_BIN", "evalplus.codegen"),
     "evalplus_evaluate_bin": os.environ.get("EVALPLUS_EVALUATE_BIN", "evalplus.evaluate"),
     # Quick-suite defaults sized to keep the total runtime reasonable on local hardware.
-    "gsm8k_limit": 30,
-    "gsm8k_fewshot": 4,
-    "mmlu_limit": 100,
-    "mmlu_fewshot": 5,
-    "ifeval_limit": 40,
-    "ifeval_fewshot": 0,
     "humaneval_limit": 20,
     "run_humaneval": False,
     "run_bfcl": False,
     "run_aider": False,
+    "run_lm_evals": False,
+    "full_mode": False,
 }
 
-# LM-Eval suites with default limit and fewshot
-LM_EVAL_SUITES = (
-    ("gsm8k", DEFAULTS["gsm8k_limit"], DEFAULTS["gsm8k_fewshot"]),
-    ("mmlu", DEFAULTS["mmlu_limit"], DEFAULTS["mmlu_fewshot"]),
-    ("ifeval", DEFAULTS["ifeval_limit"], DEFAULTS["ifeval_fewshot"]),
-)
+config_fast = {
+    "gsm8k": {
+        "task": "gsm8k_cot_llama",  # designed for modern instruct/chat formatting
+        "use_chat": True, # Uses chat API, better suited for instruct models
+        "limit": 10, #30,
+        "shots": 4,
+        # "context": 8192,
+        "model_args": [
+            f"max_gen_toks=1024",
+            f"seed=1234",
+        ],
+        "cmd_args": [
+            "--apply_chat_template",
+            "--fewshot_as_multiturn",
+            "--gen_kwargs",
+            "temperature=0.0,top_p=1.0",
+        ]
+    },
+    "mmlu": {
+        "task": "mmlu",
+        "use_chat": False,
+        "use_custom_lm_eval_backend": "llamacpp-native-mc",
+        "limit": 10, # 100,
+        "shots": 5,
+        # "context": 8192, # can be 4096
+        "model_args": [
+            "n_probs=20",
+        ]
+    },
+    "ifeval": {
+        "task": "ifeval",
+        "use_chat": True,
+        "limit": 10, # 50,
+        "shots": 0,
+        "model_args": [
+            f"max_length=8192",
+            f"max_gen_toks=2048",
+            f"seed=1234",
+        ],
+        "cmd_args": [
+            "--apply_chat_template",
+            "--gen_kwargs",
+            "temperature=0.0,top_p=1.0",
+        ]
+    }
+}
+
+config_full = {
+    "gsm8k": {
+        "task": "gsm8k_cot_llama",  
+        "use_chat": True, # Uses chat API, better suited for instruct models
+        "limit": 10, # TODO:TEMPORARY!!,
+        "shots": 8,
+        # "context": 8192,
+        "model_args": [
+            f"max_gen_toks=1024",
+            f"seed=1234",
+        ],
+        "cmd_args": [
+            "--apply_chat_template",
+            "--fewshot_as_multiturn",
+            "--gen_kwargs",
+            "temperature=0.0,top_p=1.0",
+        ]
+    },
+    "mmlu": {
+        "task": "mmlu_pro",
+        "use_chat": False,
+        "use_custom_lm_eval_backend": "llamacpp-native-mc",
+        "limit": 10, # TODO:TEMPORARY!!,
+        "shots": 5,
+        "model_args": [
+            f"n_probs=40",
+        ],
+    },
+    "ifeval": {
+        "task": "ifeval",
+        "use_chat": True,
+        "limit": 10, # TODO:TEMPORARY!!,
+        "shots": 0,
+        "model_args": [
+            f"max_length=8192",
+            f"max_gen_toks=2048",
+            f"seed=1234",
+        ],
+        "cmd_args": [
+            "--apply_chat_template",
+            "--gen_kwargs",
+            "temperature=0.0,top_p=1.0",
+        ]
+    }
+}
 
 @dataclass(frozen=True)
 class Summary:
@@ -76,7 +153,7 @@ class Summary:
     model_name: str
     ctx: int
     ngl: int
-    temperature: float
+    temp: float
     top_p: float
     seed: int
     gsm8k_primary_metric: str = ""
@@ -149,26 +226,19 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"models_count={len(resolved_models)}",
         f"ctx={args.ctx}",
         f"ngl={args.ngl}",
-        f"temperature={args.temp}",
-        f"top_p={args.top_p}",
-        f"seed={args.seed}",
-        f"max_gen_toks={args.max_gen_toks}",
+        f"default_temp={args.default_temp}",
+        f"default_top_p={args.default_top_p}",
+        f"default_seed={args.default_seed}",
         f"server_host={args.server_host}",
         f"server_port={args.server_port}",
-        f"llama_server_bin={args.llama_server_bin}",
-        f"lm_eval_bin={args.lm_eval_bin}",
         f"evalplus_codegen_bin={args.evalplus_codegen_bin}",
         f"evalplus_evaluate_bin={args.evalplus_evaluate_bin}",
-        f"gsm8k_limit={args.gsm8k_limit}",
-        f"gsm8k_fewshot={args.gsm8k_fewshot}",
-        f"mmlu_limit={args.mmlu_limit}",
-        f"mmlu_fewshot={args.mmlu_fewshot}",
-        f"ifeval_limit={args.ifeval_limit}",
-        f"ifeval_fewshot={args.ifeval_fewshot}",
         f"humaneval_limit={args.humaneval_limit}",
         f"run_humaneval={args.run_humaneval}",
-        f"bfcl_command_template={args.bfcl_command_template or ''}",
-        f"aider_command_template={args.aider_command_template or ''}",
+        f"run_lm_evals={args.run_lm_evals}",
+        f"full_mode={args.full_mode}",
+        # f"bfcl_command_template={args.bfcl_command_template or ''}",
+        # f"aider_command_template={args.aider_command_template or ''}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -180,32 +250,30 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("models_file", help="Path to models list file (same format as models/models.txt).")
     parser.add_argument(
+        "-t",
         "--tokenizer-map-file",
+        dest="tokenizer_map_file",
         default="",
+        metavar="PATH",
         help="Optional MODEL_PATH=TOKENIZER_ID map for lm-eval tasks; recommended for MMLU/loglikelihood runs.",
     )
     parser.add_argument("--out-dir-base", default=DEFAULTS["out_dir_base"])
     parser.add_argument("--ngl", type=int, default=DEFAULTS["ngl"])
     parser.add_argument("--ctx", type=int, default=DEFAULTS["ctx"])
-    parser.add_argument("--temp", type=float, default=DEFAULTS["temp"])
-    parser.add_argument("--top-p", type=float, default=DEFAULTS["top_p"])
-    parser.add_argument("--seed", type=int, default=DEFAULTS["seed"])
-    parser.add_argument("--max-gen-toks", type=int, default=DEFAULTS["max_gen_toks"])
-    parser.add_argument("--num-concurrent", type=int, default=DEFAULTS["num_concurrent"])
-    parser.add_argument("--max-retries", type=int, default=DEFAULTS["max_retries"])
-    parser.add_argument("--suite-timeout-s", type=int, default=DEFAULTS["suite_timeout_s"])
+    parser.add_argument("--default-temp", type=float, default=DEFAULTS["temp"])
+    parser.add_argument("--default-top-p", type=float, default=DEFAULTS["top_p"])
+    parser.add_argument("--default-seed", type=int, default=DEFAULTS["seed"])
     parser.add_argument("--server-host", default=DEFAULTS["server_host"])
     parser.add_argument("--server-port", type=int, default=DEFAULTS["server_port"])
-    parser.add_argument("--llama-server-bin", default=DEFAULTS["llama_server_bin"])
-    parser.add_argument("--lm-eval-bin", default=DEFAULTS["lm_eval_bin"])
     parser.add_argument("--evalplus-codegen-bin", default=DEFAULTS["evalplus_codegen_bin"])
     parser.add_argument("--evalplus-evaluate-bin", default=DEFAULTS["evalplus_evaluate_bin"])
-    parser.add_argument("--gsm8k-limit", type=int, default=DEFAULTS["gsm8k_limit"])
-    parser.add_argument("--gsm8k-fewshot", type=int, default=DEFAULTS["gsm8k_fewshot"])
-    parser.add_argument("--mmlu-limit", type=int, default=DEFAULTS["mmlu_limit"])
-    parser.add_argument("--mmlu-fewshot", type=int, default=DEFAULTS["mmlu_fewshot"])
-    parser.add_argument("--ifeval-limit", type=int, default=DEFAULTS["ifeval_limit"])
-    parser.add_argument("--ifeval-fewshot", type=int, default=DEFAULTS["ifeval_fewshot"])
+    parser.add_argument("--full-mode", action=argparse.BooleanOptionalAction, default=DEFAULTS["full_mode"])
+    parser.add_argument(
+        "--run-lm-evals",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULTS["run_lm_evals"],
+        help="Run LM-Eval suites if LM-Eval is installed.",
+    )
     parser.add_argument(
         "--run-humaneval",
         action=argparse.BooleanOptionalAction,
@@ -246,6 +314,57 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _get_lm_eval_cmd(suite_config: dict, ctx: ModelContext, tokenizer_id: str) -> List[str]:
+    custom_backend = str(suite_config.get("use_custom_lm_eval_backend", ""))
+    use_chat = bool(suite_config.get("use_chat", False))
+
+    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}" 
+    if not custom_backend:
+        base_url += "/v1/chat/completions" if use_chat else "/v1/completions"
+
+    extra_model_args = cast(List[str], suite_config.get("model_args") or [])
+    model_args = ",".join([
+        f"model={ctx.model_slug}",
+        f"base_url={base_url}",
+        "num_concurrent=1",
+        "max_retries=3",
+        "tokenized_requests=False",
+        *extra_model_args,
+    ])
+    if tokenizer_id:
+        model_args += f",tokenizer={tokenizer_id},tokenizer_backend=huggingface"
+
+    if custom_backend:
+        cmd = [
+            sys.executable,
+            str(Path(__file__).with_name("lm_eval_with_local_models.py")),
+            "run",
+            "--model",
+            custom_backend,
+        ]
+    else:
+        cmd = [
+            LM_EVAL_BIN,
+            "run",
+            "--model",
+            "local-chat-completions" if use_chat else "local-completions",
+        ]
+    cmd.extend([
+        "--model_args",
+        model_args,
+        "--tasks",
+        str(suite_config["task"]),
+        "--num_fewshot",
+        str(suite_config.get("shots", 0)),
+    ])
+    cmd.extend(cast(List[str], suite_config.get("cmd_args", [])))
+    limit = suite_config.get("limit", 0)
+    if limit > 0:
+        cmd.append("--limit")
+        cmd.append(str(limit))
+    return cmd
+
+
 def _benchmark_model(ctx: ModelContext,
     summary_csv: Path, suite_runs_csv: Path, metrics_csv: Path, tokenizer_map: Dict[str, str]) -> None:
 
@@ -273,6 +392,7 @@ def _benchmark_model(ctx: ModelContext,
                     )
 
     def run_benchmark_suite(suite_name: str, limit: int, runner: Callable[[], Tuple[str, str, List[Metric], str]]) -> Tuple[bool, str]:
+        print(f"  - Running {suite_name} (limit={limit})", end=". ", flush=True)
         try:
             primary_name, primary_value, metrics, runtime_s = runner()
             append_csv_row(
@@ -282,7 +402,7 @@ def _benchmark_model(ctx: ModelContext,
                 )
             for row in metrics:
                 append_csv_row(metrics_csv, METRIC_FIELDS, row.to_dict())
-            print(f"  - {suite_name}: {primary_name}={primary_value}")
+            print(f"Results: {primary_name}={primary_value}")
             return True, primary_value
         except (BenchmarkError, subprocess.SubprocessError, TimeoutError) as exc:
             model_errors.append(f"{suite_name}: {exc}")
@@ -291,33 +411,35 @@ def _benchmark_model(ctx: ModelContext,
                 SUITE_RUN_FIELDS,
                 getSuiteRunRow(suite=suite_name, limit=limit, status="failed", error_note=str(exc)).to_dict(),
             )
-            print(f"  - {suite_name}: ERROR: {exc}")
+            print(f"ERROR: {exc}")
             return False, ""
 
     model_status = "ok"
     model_errors: List[str] = []
+    tokenizer_id = tokenizer_map.get(ctx.model_path, "")
     try:
         server_log = ctx.model_raw_dir / "server.log"
         global server_proc
-        server_proc = start_server(
-            ctx.args.llama_server_bin, server_log, ctx.model_path, ctx.args.ngl, ctx.args.ctx,
-            ctx.args.server_host, ctx.args.server_port, None, ctx.args.temp, ctx.args.top_p, ctx.args.seed)
+        server_proc = start_llama_server(
+            server_log, ctx.model_path, ctx.args.ngl, ctx.args.ctx,
+            ctx.args.server_host, ctx.args.server_port, None,
+            ctx.args.default_temp, ctx.args.default_top_p, ctx.args.default_seed)
 
-        # Run LM-Eval suites
-        for suite_name, default_limit, default_fewshot in LM_EVAL_SUITES:
-            limit = getattr(ctx.args, f"{suite_name}_limit", default_limit)
-            fewshot = getattr(ctx.args, f"{suite_name}_fewshot", default_fewshot)
+        if ctx.args.run_lm_evals:
+            suites = config_full if ctx.args.full_mode else config_fast
+            for suite_name, suite_config in suites.items():
+                # Run GSM8K
+                # suite_name = "gsm8k"
+                # suite_name = "mmlu"
+                # suite_name = "ifeval"
+                cmd = _get_lm_eval_cmd(suite_config, ctx, tokenizer_id)
+                limit = suite_config.get("limit", 0)
 
-            success, primary_value = run_benchmark_suite(suite_name, limit, lambda: run_lm_eval_suite(
-                ctx=ctx,
-                tokenizer_id=tokenizer_map.get(ctx.model_path, ""),
-                suite_name=suite_name,
-                limit=limit,
-                fewshot=fewshot,
-            ))
-            summary_values[f"{suite_name}_primary_metric"] = primary_value
-            if not success:
-                model_status = "partial"
+                success, primary_value = run_benchmark_suite(suite_name, limit, lambda: run_lm_eval_suite(
+                    ctx=ctx, suite_name=suite_name, limit=limit, cmd=cmd))
+                summary_values[f"{suite_name}_primary_metric"] = primary_value
+                if not success:
+                    model_status = "partial"
 
         # Run EvalPlus HumanEval+ subset
         if ctx.args.run_humaneval:
@@ -367,9 +489,9 @@ def _benchmark_model(ctx: ModelContext,
                 model_name=ctx.model_slug,
                 ctx=ctx.args.ctx,
                 ngl=ctx.args.ngl,
-                temperature=ctx.args.temp,
-                top_p=ctx.args.top_p,
-                seed=ctx.args.seed,
+                temp=ctx.args.default_temp,
+                top_p=ctx.args.default_top_p,
+                seed=ctx.args.default_seed,
                 gsm8k_primary_metric=summary_values["gsm8k_primary_metric"],
                 mmlu_primary_metric=summary_values["mmlu_primary_metric"],
                 ifeval_primary_metric=summary_values["ifeval_primary_metric"],
@@ -386,27 +508,32 @@ server_proc: Optional[subprocess.Popen[str]] = None
 
 
 def main() -> int:
+    ensure_commands_exist([LLAMA_SERVER_BIN, LM_EVAL_BIN])
+
     args = _parse_args()
+
+    # Read models
     models_file = Path(args.models_file)
     if not models_file.is_file():
         raise BenchmarkError(f"models file not found: {models_file}")
-
-    ensure_commands_exist([args.llama_server_bin, args.lm_eval_bin])
     models = read_models_file(models_file)
     if not models:
         raise BenchmarkError(f"no model entries found in {models_file}")
+
+    # Read tokenizers
     tokenizer_map: Dict[str, str] = {}
     if args.tokenizer_map_file:
+        print(f"Reading tokenizers from: {args.tokenizer_map_file}")
         tokenizer_path = Path(args.tokenizer_map_file)
         if not tokenizer_path.is_file():
             raise BenchmarkError(f"tokenizer map file not found: {tokenizer_path}")
         tokenizer_map = _read_tokenizer_map_file(tokenizer_path)
 
+    # Create run folders and files
     ts_slug = timestamp_slug()
     run_dir = Path(args.out_dir_base) / ts_slug
     raw_dir = run_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
-
     summary_csv = run_dir / "summary.csv"
     suite_runs_csv = run_dir / "suite_runs.csv"
     metrics_csv = run_dir / "metrics.csv"
@@ -416,7 +543,7 @@ def main() -> int:
     write_csv(metrics_csv, METRIC_FIELDS)
     _write_meta(meta_file, args, models)
 
-    print(f"Run directory: {run_dir}")
+    print(f"Running in folder: {run_dir}")
     print()
 
     def signal_cleanup(*_: object) -> None:
@@ -429,7 +556,7 @@ def main() -> int:
         model_raw_dir = raw_dir / model_slug
         model_raw_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"[{index}] Model: {model_path}")
+        print(f"[{index}] Benchmarking model: {model_path}")
 
         if not Path(model_path).is_file():
             err = "model file not found"
@@ -442,9 +569,9 @@ def main() -> int:
                     model_name=model_slug,
                     ctx=args.ctx,
                     ngl=args.ngl,
-                    temperature=args.temp,
-                    top_p=args.top_p,
-                    seed=args.seed,
+                    temp=args.default_temp,
+                    top_p=args.default_top_p,
+                    seed=args.default_seed,
                     status="failed",
                     error_note=err,
                 ).to_dict(),
@@ -458,7 +585,7 @@ def main() -> int:
             model_raw_dir=model_raw_dir)
         _benchmark_model(context, summary_csv, suite_runs_csv, metrics_csv, tokenizer_map)
 
-    print("Done.")
+    print("Benchmark complete.")
     print(f"Summary CSV: {summary_csv}")
     print(f"Suite runs CSV: {suite_runs_csv}")
     print(f"Metrics CSV: {metrics_csv}")
