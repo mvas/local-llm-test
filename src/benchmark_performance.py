@@ -28,7 +28,8 @@ from common import (
     Metric,
     ModelContext,
 )
-from suite_evalplus import run_humaneval, run_humaneval_suite, run_mbpp
+from suite_evalplus import run_humaneval, run_mbpp
+from suite_bfcl import run_bfcl
 from suite_lm_eval import run_lm_eval_suite
 from suite_templated import run_external_template_suite
 
@@ -234,9 +235,12 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"mbpp_limit={args.mbpp_limit}",
         f"run_humaneval={args.run_humaneval}",
         f"run_mbpp={args.run_mbpp}",
+        f"run_bfcl={args.run_bfcl}",
+        f"bfcl_limit={args.bfcl_limit}",
+        f"bfcl_model_id_map_file={args.bfcl_model_id_map_file}",
+        f"bfcl_remote_tokenizer_path={args.bfcl_remote_tokenizer_path}",
         f"run_lm_evals={args.run_lm_evals}",
         f"full_mode={args.full_mode}",
-        # f"bfcl_command_template={args.bfcl_command_template or ''}",
         # f"aider_command_template={args.aider_command_template or ''}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -289,9 +293,20 @@ def _parse_args() -> argparse.Namespace:
         "--run-bfcl",
         action=argparse.BooleanOptionalAction,
         default=DEFAULTS["run_bfcl"],
-        help="Run BFCL benchmark subset if BFCL is installed.",
+        help="Run BFCL benchmark using the dedicated BFCL environment.",
     )
     parser.add_argument("--bfcl-limit", type=int, default=20)
+    parser.add_argument(
+        "--bfcl-model-id-map-file",
+        default="models/bfcl-model-ids.txt",
+        metavar="PATH",
+        help="MODEL_PATH=BFCL_MODEL_ID map used when --bfcl-model-id is not set.",
+    )
+    parser.add_argument(
+        "--bfcl-remote-tokenizer-path",
+        default="",
+        help="Optional tokenizer path for REMOTE_OPENAI_TOKENIZER_PATH.",
+    )
     parser.add_argument(
         "--run-aider",
         action=argparse.BooleanOptionalAction,
@@ -299,14 +314,6 @@ def _parse_args() -> argparse.Namespace:
         help="Run Aider benchmark subset if Aider is installed.",
     )
     parser.add_argument("--aider-limit", type=int, default=20)
-    # parser.add_argument(
-    #     "--bfcl-command-template",
-    #     default="",
-    #     help=(
-    #         "Optional shell command template for BFCL. Available placeholders: "
-    #         "{model_name}, {model_path}, {base_url}, {host}, {port}, {suite_dir}, {limit}, {ctx}, {seed}"
-    #     ),
-    # )
     # parser.add_argument(
     #     "--aider-command-template",
     #     default="",
@@ -465,12 +472,8 @@ def _benchmark_model(ctx: ModelContext,
 
         # Run BFCL benchmark subset
         if ctx.args.run_bfcl:
-            success, primary_value = run_benchmark_suite("bfcl", ctx.args.bfcl_limit, lambda: run_external_template_suite(
-                suite_name="bfcl",
-                template=ctx.args.bfcl_command_template,
-                ctx=ctx,
-                limit=ctx.args.bfcl_limit,
-            ))
+            success, primary_value = run_benchmark_suite(
+                "bfcl", ctx.args.bfcl_limit, lambda: run_bfcl(ctx=ctx, full_mode=ctx.args.full_mode))
             summary_values["bfcl_primary_metric"] = primary_value
             if not success:
                 model_status = "partial"

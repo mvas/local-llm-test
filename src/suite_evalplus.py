@@ -114,19 +114,13 @@ def _raise_if_evalplus_stderr_has_errors(stderr_path: Path) -> None:
         )
 
 
-def _find_latest_matching(root: Path, pattern: str) -> Path:
-    candidates = sorted(root.rglob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not candidates:
-        raise BenchmarkError(f"could not find {pattern} under {root}")
-    return candidates[0]
-
-
 def run_humaneval(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
     return run_humaneval_suite(ctx=ctx,
         suite_name="humaneval",
         limit=ctx.args.humaneval_limit,
         create_subset_func=_create_humaneval_subset,
         env_var_name="HUMANEVAL_OVERRIDE_PATH")
+
 
 def run_mbpp(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
     return run_humaneval_suite(
