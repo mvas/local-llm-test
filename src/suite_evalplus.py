@@ -115,7 +115,7 @@ def _raise_if_evalplus_stderr_has_errors(stderr_path: Path) -> None:
 
 
 def run_humaneval(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
-    return run_humaneval_suite(ctx=ctx,
+    return _run_humaneval_suite(ctx=ctx,
         suite_name="humaneval",
         limit=ctx.args.humaneval_limit,
         create_subset_func=_create_humaneval_subset,
@@ -123,7 +123,7 @@ def run_humaneval(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
 
 
 def run_mbpp(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
-    return run_humaneval_suite(
+    return _run_humaneval_suite(
         ctx=ctx,
         suite_name="mbpp",
         limit=ctx.args.mbpp_limit,
@@ -131,7 +131,7 @@ def run_mbpp(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
         env_var_name="MBPP_OVERRIDE_PATH")
 
 
-def run_humaneval_suite(
+def _run_humaneval_suite(
     ctx: ModelContext,
     suite_name: str,
     limit: int,
