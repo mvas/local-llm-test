@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass, fields
-import os
 from pathlib import Path
 import signal
 import subprocess
@@ -30,8 +29,8 @@ from common import (
 )
 from suite_evalplus import run_humaneval, run_mbpp
 from suite_bfcl import run_bfcl
+from suite_aider import run_aider
 from suite_lm_eval import run_lm_eval_suite
-from suite_templated import run_external_template_suite
 
 
 DEFAULTS = {
@@ -241,7 +240,10 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"bfcl_remote_tokenizer_path={args.bfcl_remote_tokenizer_path}",
         f"run_lm_evals={args.run_lm_evals}",
         f"full_mode={args.full_mode}",
-        # f"aider_command_template={args.aider_command_template or ''}",
+        f"run_aider={args.run_aider}",
+        f"aider_limit={args.aider_limit}",
+        f"aider_repo_dir={args.aider_repo_dir}",
+        f"aider_model_map_file={args.aider_model_map_file}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -311,17 +313,21 @@ def _parse_args() -> argparse.Namespace:
         "--run-aider",
         action=argparse.BooleanOptionalAction,
         default=DEFAULTS["run_aider"],
-        help="Run Aider benchmark subset if Aider is installed.",
+        help="Run Aider benchmark via aider-benchmark Docker image.",
     )
     parser.add_argument("--aider-limit", type=int, default=20)
-    # parser.add_argument(
-    #     "--aider-command-template",
-    #     default="",
-    #     help=(
-    #         "Optional shell command template for Aider benchmark subset. Available placeholders: "
-    #         "{model_name}, {model_path}, {base_url}, {host}, {port}, {suite_dir}, {limit}, {ctx}, {seed}"
-    #     ),
-    # )
+    parser.add_argument(
+        "--aider-repo-dir",
+        default="../aider",
+        metavar="PATH",
+        help="Path to Aider repo clone that contains benchmark assets.",
+    )
+    parser.add_argument(
+        "--aider-model-map-file",
+        default="",
+        metavar="PATH",
+        help="Optional MODEL_PATH=AIDER_MODEL_ID map file for Aider model ids.",
+    )
     return parser.parse_args()
 
 
@@ -480,12 +486,11 @@ def _benchmark_model(ctx: ModelContext,
 
         # Run Aider benchmark subset
         if ctx.args.run_aider:
-            success, primary_value = run_benchmark_suite("aider", ctx.args.aider_limit, lambda: run_external_template_suite(
-                suite_name="aider",
-                template=ctx.args.aider_command_template,
-                ctx=ctx,
-                limit=ctx.args.aider_limit,
-            ))
+            success, primary_value = run_benchmark_suite(
+                "aider",
+                ctx.args.aider_limit,
+                lambda: run_aider(ctx=ctx, full_mode=ctx.args.full_mode),
+            )
             summary_values["aider_primary_metric"] = primary_value
             if not success:
                 model_status = "partial"
