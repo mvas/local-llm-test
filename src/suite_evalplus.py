@@ -114,19 +114,23 @@ def _raise_if_evalplus_stderr_has_errors(stderr_path: Path) -> None:
         )
 
 
-def run_humaneval(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
+def run_humaneval(ctx: ModelContext, host:str, port: int, limit: int) -> Tuple[str, str, List[Metric], str]:
     return _run_humaneval_suite(ctx=ctx,
         suite_name="humaneval",
-        limit=ctx.args.humaneval_limit,
+        host=host,
+        port=port,
+        limit=limit,
         create_subset_func=_create_humaneval_subset,
         env_var_name="HUMANEVAL_OVERRIDE_PATH")
 
 
-def run_mbpp(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
+def run_mbpp(ctx: ModelContext, host:str, port: int, limit: int) -> Tuple[str, str, List[Metric], str]:
     return _run_humaneval_suite(
         ctx=ctx,
         suite_name="mbpp",
-        limit=ctx.args.mbpp_limit,
+        host=host,
+        port=port,
+        limit=limit,
         create_subset_func=_create_mbpp_subset,
         env_var_name="MBPP_OVERRIDE_PATH")
 
@@ -134,6 +138,8 @@ def run_mbpp(ctx: ModelContext) -> Tuple[str, str, List[Metric], str]:
 def _run_humaneval_suite(
     ctx: ModelContext,
     suite_name: str,
+    host:str,
+    port: int,
     limit: int,
     create_subset_func: Callable[[int, Path], None],
     env_var_name: str
@@ -152,7 +158,7 @@ def _run_humaneval_suite(
     env.setdefault("OPENAI_API_KEY", "local-benchmark")
     # Avoid RLIMIT failures on some macOS setups during EvalPlus worker execution.
     env.setdefault("EVALPLUS_MAX_MEMORY_BYTES", "-1")
-    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1"
+    base_url = f"http://{host}:{port}/v1"
 
     eval_stdout = suite_dir / "evaluate.stdout.log"
     eval_stderr = suite_dir / "evaluate.stderr.log"

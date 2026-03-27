@@ -116,10 +116,10 @@ def _validate_aider_setup(aider_repo_dir: Path) -> None:
             f"Clone {exercises_dir} under tmp.benchmarks first."
         )
 
-def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric], str]:
+def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int) -> Tuple[str, str, List[Metric], str]:
     ensure_commands_exist(["docker"])
 
-    aider_repo_dir = Path(ctx.args.aider_repo_dir).expanduser().resolve()
+    aider_repo_dir = Path("../aider").expanduser().resolve()
     _validate_aider_setup(aider_repo_dir)
 
     rundir_prefix = dt.datetime.now().strftime("%Y-%m-%d-%H%M%S")
@@ -133,8 +133,7 @@ def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric
     # benchmark_root_host_dir = suite_dir / "bench"
     # benchmark_root_host_dir.mkdir(parents=True, exist_ok=True)
 
-    # aider_model_id = _resolve_aider_model_id(ctx)
-    num_tests = -1 if full_mode else int(ctx.args.aider_limit)
+    num_tests = -1 if limit <= 0 else limit
 
     # Container launch command
     cmd: List[str] = [
@@ -156,7 +155,7 @@ def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric
         "-e",
         "AIDER_BENCHMARK_DIR=/benchmarks",
         "-e",
-        f"OPENAI_API_BASE=http://host.docker.internal:{ctx.args.server_port}/v1",
+        f"OPENAI_API_BASE=http://host.docker.internal:{port}/v1",
         "-e",
         f"OPENAI_API_KEY=local-benchmark",
         "aider-benchmark", # docker image name
@@ -178,6 +177,10 @@ def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric
         "--exercises-dir",
         "polyglot-benchmark",
     ])
+
+    if not full_mode:
+        cmd.append("--languages")
+        cmd.append("python")
 
     stdout_path = suite_dir / "run.stdout.log"
     stderr_path = suite_dir / "run.stderr.log"
@@ -204,7 +207,7 @@ def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric
             metric_name=metric_name,
             metric_value=f"{metric_value:.6f}",
             metric_stderr="",
-            limit=ctx.args.aider_limit,
+            limit=limit,
             status="ok",
             error_note="",
         )

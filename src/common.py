@@ -28,7 +28,6 @@ class BenchmarkError(RuntimeError):
 
 @dataclass(frozen=True)
 class ModelContext:
-    args: argparse.Namespace
     ts_slug: str
     model_path: str
     model_slug: str

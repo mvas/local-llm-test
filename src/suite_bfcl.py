@@ -46,13 +46,7 @@ def _read_bfcl_model_id_map_file(path: Path) -> Dict[str, str]:
     return mapping
 
 
-def _resolve_bfcl_model_id(ctx: ModelContext) -> str:
-    map_file = str(getattr(ctx.args, "bfcl_model_id_map_file", "")).strip()
-    if not map_file:
-        raise BenchmarkError(
-            "--bfcl-model-id is required when --run-bfcl is enabled "
-            "(or set --bfcl-model-id-map-file)"
-        )
+def _resolve_bfcl_model_id(ctx: ModelContext, map_file: str) -> str:
     map_path = Path(map_file).expanduser()
     if not map_path.is_file():
         raise BenchmarkError(f"BFCL model id map file not found: {map_path}")
@@ -154,43 +148,42 @@ def _parse_bfcl_metrics(score_dir: Path, bfcl_model_id: str) -> Dict[str, float]
     return metrics
 
 
-def run_bfcl(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric], str]:
+def run_bfcl(ctx: ModelContext, host:str, port: int, full_mode: bool, limit: int, map_file: str) -> Tuple[str, str, List[Metric], str]:
     bfcl_env_path = Path(".venv-bfcl")
     bfcl_bin = bfcl_env_path / "bin" / "bfcl"
     bfcl_python = bfcl_env_path / "bin" / "python"
-    bfcl_model_id = _resolve_bfcl_model_id(ctx)
+    bfcl_model_id = _resolve_bfcl_model_id(ctx, map_file)
     ensure_commands_exist([str(bfcl_bin), str(bfcl_python)])
 
     suite_dir = ctx.model_raw_dir / "bfcl"
     suite_dir.mkdir(parents=True, exist_ok=True)
     result_dir_name = "result"
     score_dir_name = "score"
-    result_dir = suite_dir / result_dir_name
     score_dir = suite_dir / score_dir_name
 
     categories_csv = "python"
 
     env = os.environ.copy()
     env["BFCL_PROJECT_ROOT"] = str(suite_dir)
-    env["LOCAL_SERVER_ENDPOINT"] = ctx.args.server_host
-    env["LOCAL_SERVER_PORT"] = str(ctx.args.server_port)
+    env["LOCAL_SERVER_ENDPOINT"] = host
+    env["LOCAL_SERVER_PORT"] = str(port)
     env.setdefault(
         "REMOTE_OPENAI_BASE_URL",
-        f"http://{ctx.args.server_host}:{ctx.args.server_port}/v1",
+        f"http://{host}:{port}/v1",
     )
     env.setdefault("REMOTE_OPENAI_API_KEY", "local-benchmark")
     # if ctx.args.bfcl_remote_tokenizer_path:
     #     env["REMOTE_OPENAI_TOKENIZER_PATH"] = ctx.args.bfcl_remote_tokenizer_path
 
     run_ids = False
-    if ctx.args.bfcl_limit > 0:
+    if limit > 0:
         run_ids = True
         subset_ids_path = suite_dir / "test_case_ids_to_generate.json"
         _write_subset_ids_file(
             bfcl_python=bfcl_python,
             output_path=subset_ids_path,
             categories_csv=categories_csv,
-            limit=ctx.args.bfcl_limit,
+            limit=limit,
         )
 
     generate_stdout = suite_dir / "generate.stdout.log"
@@ -270,7 +263,7 @@ def run_bfcl(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric]
             metric_name=metric_name,
             metric_value=f"{metric_value:.6f}",
             metric_stderr="",
-            limit=ctx.args.bfcl_limit,
+            limit=limit,
             status="ok",
             error_note="",
         )

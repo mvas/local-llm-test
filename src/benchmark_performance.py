@@ -55,7 +55,7 @@ config_fast = {
     "gsm8k": {
         "task": "gsm8k_cot_llama",  # designed for modern instruct/chat formatting
         "use_chat": True, # Uses chat API, better suited for instruct models
-        "limit": 10, #30,
+        "limit": 30, #30,
         "shots": 4,
         # "context": 8192,
         "model_args": [
@@ -73,7 +73,7 @@ config_fast = {
         "task": "mmlu",
         "use_chat": False,
         "use_custom_lm_eval_backend": "llamacpp-native-mc",
-        "limit": 10, # 100,
+        "limit": 20, # 100,
         "shots": 5,
         # "context": 8192, # can be 4096
         "model_args": [
@@ -83,7 +83,7 @@ config_fast = {
     "ifeval": {
         "task": "ifeval",
         "use_chat": True,
-        "limit": 10, # 50,
+        "limit": 30, # 50,
         "shots": 0,
         "model_args": [
             f"max_length=8192",
@@ -237,13 +237,10 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"run_bfcl={args.run_bfcl}",
         f"bfcl_limit={args.bfcl_limit}",
         f"bfcl_model_id_map_file={args.bfcl_model_id_map_file}",
-        f"bfcl_remote_tokenizer_path={args.bfcl_remote_tokenizer_path}",
         f"run_lm_evals={args.run_lm_evals}",
         f"full_mode={args.full_mode}",
         f"run_aider={args.run_aider}",
         f"aider_limit={args.aider_limit}",
-        f"aider_repo_dir={args.aider_repo_dir}",
-        f"aider_model_map_file={args.aider_model_map_file}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -305,37 +302,20 @@ def _parse_args() -> argparse.Namespace:
         help="MODEL_PATH=BFCL_MODEL_ID map used when --bfcl-model-id is not set.",
     )
     parser.add_argument(
-        "--bfcl-remote-tokenizer-path",
-        default="",
-        help="Optional tokenizer path for REMOTE_OPENAI_TOKENIZER_PATH.",
-    )
-    parser.add_argument(
         "--run-aider",
         action=argparse.BooleanOptionalAction,
         default=DEFAULTS["run_aider"],
         help="Run Aider benchmark via aider-benchmark Docker image.",
     )
     parser.add_argument("--aider-limit", type=int, default=20)
-    parser.add_argument(
-        "--aider-repo-dir",
-        default="../aider",
-        metavar="PATH",
-        help="Path to Aider repo clone that contains benchmark assets.",
-    )
-    parser.add_argument(
-        "--aider-model-map-file",
-        default="",
-        metavar="PATH",
-        help="Optional MODEL_PATH=AIDER_MODEL_ID map file for Aider model ids.",
-    )
     return parser.parse_args()
 
 
-def _get_lm_eval_cmd(suite_config: dict, ctx: ModelContext, tokenizer_id: str) -> List[str]:
+def _get_lm_eval_cmd(suite_config: dict, ctx: ModelContext, host:str, port: int, tokenizer_id: str) -> List[str]:
     custom_backend = str(suite_config.get("use_custom_lm_eval_backend", ""))
     use_chat = bool(suite_config.get("use_chat", False))
 
-    base_url = f"http://{ctx.args.server_host}:{ctx.args.server_port}" 
+    base_url = f"http://{host}:{port}" 
     if not custom_backend:
         base_url += "/v1/chat/completions" if use_chat else "/v1/completions"
 
@@ -382,8 +362,14 @@ def _get_lm_eval_cmd(suite_config: dict, ctx: ModelContext, tokenizer_id: str) -
     return cmd
 
 
-def _benchmark_model(ctx: ModelContext,
-    summary_csv: Path, suite_runs_csv: Path, metrics_csv: Path, tokenizer_map: Dict[str, str]) -> None:
+def _benchmark_model(
+    ctx: ModelContext,
+    args: argparse.Namespace,
+    summary_csv: Path,
+    suite_runs_csv: Path,
+    metrics_csv: Path,
+    tokenizer_map: Dict[str, str],
+) -> None:
 
     def run_benchmark_suite(suite_name: str, limit: int, runner: Callable[[], Tuple[str, str, List[Metric], str]]) -> Tuple[bool, str]:
         print(f"  - Running {suite_name} (limit={limit})", end=". ", flush=True)
@@ -443,53 +429,77 @@ def _benchmark_model(ctx: ModelContext,
         server_log = ctx.model_raw_dir / "server.log"
         global server_proc
         server_proc = start_llama_server(
-            server_log, ctx.model_path, ctx.args.ngl, ctx.args.ctx,
-            ctx.args.server_host, ctx.args.server_port, None,
-            ctx.args.default_temp, ctx.args.default_top_p, ctx.args.default_seed)
+            server_log, ctx.model_path, args.ngl, args.ctx,
+            args.server_host, args.server_port, None,
+            args.default_temp, args.default_top_p, args.default_seed)
 
         # Run LM-Eval suites
-        if ctx.args.run_lm_evals:
-            suites = config_full if ctx.args.full_mode else config_fast
+        if args.run_lm_evals:
+            suites = config_full if args.full_mode else config_fast
             for suite_name, suite_config in suites.items():
-                cmd = _get_lm_eval_cmd(suite_config, ctx, tokenizer_id)
+                cmd = _get_lm_eval_cmd(suite_config, ctx, args.server_host, args.server_port, tokenizer_id)
                 limit = suite_config.get("limit", 0)
 
-                success, primary_value = run_benchmark_suite(suite_name, limit, lambda: run_lm_eval_suite(
-                    ctx=ctx, suite_name=suite_name, limit=limit, cmd=cmd))
+                success, primary_value = run_benchmark_suite(
+                    suite_name, limit, lambda: run_lm_eval_suite(
+                        ctx=ctx,
+                        suite_name=suite_name,
+                        limit=limit,
+                        cmd=cmd,
+                    ))
                 summary_values[f"{suite_name}_primary_metric"] = primary_value
                 if not success:
                     model_status = "partial"
 
         # Run EvalPlus HumanEval+ subset
-        if ctx.args.run_humaneval:
+        if args.run_humaneval:
             success, primary_value = run_benchmark_suite(
-                "humaneval", ctx.args.humaneval_limit, lambda: run_humaneval(ctx=ctx))
+                "humaneval", args.humaneval_limit, lambda: run_humaneval(
+                    ctx=ctx,
+                    host=args.server_host,
+                    port=args.server_port,
+                    limit=args.humaneval_limit,))
             summary_values["humaneval_plus_pass_at_1"] = primary_value
             if not success:
                 model_status = "partial"
 
         # Run EvalPlus MBPP+ subset
-        if ctx.args.run_mbpp:
+        if args.run_mbpp:
             success, primary_value = run_benchmark_suite(
-                "mbpp", ctx.args.mbpp_limit, lambda: run_mbpp(ctx=ctx))
+                "mbpp", args.mbpp_limit, lambda: run_mbpp(
+                    ctx=ctx,
+                    host=args.server_host,
+                    port=args.server_port,
+                    limit=args.mbpp_limit,))
             summary_values["mbpp_plus_pass_at_1"] = primary_value
             if not success:
                 model_status = "partial"
 
         # Run BFCL benchmark subset
-        if ctx.args.run_bfcl:
+        if args.run_bfcl:
             success, primary_value = run_benchmark_suite(
-                "bfcl", ctx.args.bfcl_limit, lambda: run_bfcl(ctx=ctx, full_mode=ctx.args.full_mode))
+                "bfcl", args.bfcl_limit, lambda: run_bfcl(
+                    ctx=ctx,
+                    host=args.server_host,
+                    port=args.server_port,
+                    full_mode=args.full_mode,
+                    limit=args.bfcl_limit,
+                    map_file=args.bfcl_model_id_map_file,
+                ),
+            )
             summary_values["bfcl_primary_metric"] = primary_value
             if not success:
                 model_status = "partial"
 
         # Run Aider benchmark subset
-        if ctx.args.run_aider:
+        if args.run_aider:
             success, primary_value = run_benchmark_suite(
-                "aider",
-                ctx.args.aider_limit,
-                lambda: run_aider(ctx=ctx, full_mode=ctx.args.full_mode),
+                "aider", args.aider_limit, lambda: run_aider(
+                    ctx=ctx,
+                    port=args.server_port,
+                    full_mode=args.full_mode,
+                    limit=args.aider_limit,
+                ),
             )
             summary_values["aider_primary_metric"] = primary_value
             if not success:
@@ -509,11 +519,11 @@ def _benchmark_model(ctx: ModelContext,
                 timestamp=ctx.ts_slug,
                 model_path=ctx.model_path,
                 model_name=ctx.model_slug,
-                ctx=ctx.args.ctx,
-                ngl=ctx.args.ngl,
-                temp=ctx.args.default_temp,
-                top_p=ctx.args.default_top_p,
-                seed=ctx.args.default_seed,
+                ctx=args.ctx,
+                ngl=args.ngl,
+                temp=args.default_temp,
+                top_p=args.default_top_p,
+                seed=args.default_seed,
                 gsm8k_primary_metric=summary_values["gsm8k_primary_metric"],
                 mmlu_primary_metric=summary_values["mmlu_primary_metric"],
                 ifeval_primary_metric=summary_values["ifeval_primary_metric"],
@@ -602,11 +612,13 @@ def main() -> int:
             print(f"  - ERROR: {err}")
             print()
             continue
-        context = ModelContext(
-            args=args, ts_slug=ts_slug,
-            model_path=model_path, model_slug=model_slug,
-            model_raw_dir=model_raw_dir)
-        _benchmark_model(context, summary_csv, suite_runs_csv, metrics_csv, tokenizer_map)
+        ctx = ModelContext(
+            ts_slug=ts_slug,
+            model_path=model_path,
+            model_slug=model_slug,
+            model_raw_dir=model_raw_dir,
+        )
+        _benchmark_model(ctx, args, summary_csv, suite_runs_csv, metrics_csv, tokenizer_map)
 
     print("Benchmark complete.")
     print(f"Summary CSV: {summary_csv}")
