@@ -1,5 +1,7 @@
 #! /usr/bin/env bash
 
+# Use this to run a local OpenAI-compatible server for your model.
+
 uv run llama-server \
     -m ~/models/fast/Qwen2.5.1-Coder-7B-Instruct-Q4_K_M.gguf \
     -ngl 99 \
