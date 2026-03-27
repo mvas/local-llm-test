@@ -11,46 +11,8 @@ from common import (
     Metric,
     ModelContext,
     ensure_commands_exist,
-    expand_model_path,
 )
 from suite_common import run_logged_command
-
-
-def _read_aider_model_map_file(path: Path) -> Dict[str, str]:
-    mapping: Dict[str, str] = {}
-    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        if "=" not in line:
-            raise BenchmarkError(
-                f"invalid Aider model map entry at {path}:{line_no}; "
-                "expected MODEL_PATH=AIDER_MODEL_ID"
-            )
-        model_text, aider_model_id = line.split("=", 1)
-        model_path = expand_model_path(model_text)
-        aider_model_id = aider_model_id.strip()
-        if not aider_model_id:
-            raise BenchmarkError(f"empty Aider model id at {path}:{line_no}")
-        mapping[model_path] = aider_model_id
-    return mapping
-
-
-def _resolve_aider_model_id(ctx: ModelContext) -> str:
-    map_file = str(getattr(ctx.args, "aider_model_map_file", "")).strip()
-    if not map_file:
-        return ctx.model_slug
-    map_path = Path(map_file).expanduser()
-    if not map_path.is_file():
-        raise BenchmarkError(f"Aider model map file not found: {map_path}")
-    mapping = _read_aider_model_map_file(map_path)
-    aider_model_id = mapping.get(ctx.model_path, "")
-    if not aider_model_id:
-        raise BenchmarkError(
-            f"no Aider model id mapping for model path: {ctx.model_path} "
-            f"(in {map_path})"
-        )
-    return aider_model_id
 
 
 def _summarize_aider_results(run_dir: Path) -> Dict[str, float]:
@@ -94,18 +56,18 @@ def _summarize_aider_results(run_dir: Path) -> Dict[str, float]:
             for idx in range(len(outcomes) - 1, tries):
                 pass_counts[idx] += 1
 
-        if float(row.get("num_malformed_responses", 0) or 0) > 0:
+        if _to_float(row.get("num_malformed_responses")) > 0:
             malformed_case_count += 1
 
-        total_cost += float(row.get("cost", 0) or 0)
-        total_duration += float(row.get("duration", 0) or 0)
-        error_outputs += float(row.get("num_error_outputs", 0) or 0)
-        syntax_errors += float(row.get("syntax_errors", 0) or 0)
-        indentation_errors += float(row.get("indentation_errors", 0) or 0)
-        exhausted_context_windows += float(row.get("num_exhausted_context_windows", 0) or 0)
-        test_timeouts += float(row.get("test_timeouts", 0) or 0)
-        prompt_tokens += float(row.get("prompt_tokens", 0) or 0)
-        completion_tokens += float(row.get("completion_tokens", 0) or 0)
+        total_cost += _to_float(row.get("cost"))
+        total_duration += _to_float(row.get("duration"))
+        error_outputs += _to_float(row.get("num_error_outputs"))
+        syntax_errors += _to_float(row.get("syntax_errors"))
+        indentation_errors += _to_float(row.get("indentation_errors"))
+        exhausted_context_windows += _to_float(row.get("num_exhausted_context_windows"))
+        test_timeouts += _to_float(row.get("test_timeouts"))
+        prompt_tokens += _to_float(row.get("prompt_tokens"))
+        completion_tokens += _to_float(row.get("completion_tokens"))
 
     metrics: Dict[str, float] = {}
     for idx, passed in enumerate(pass_counts, start=1):
@@ -131,11 +93,14 @@ def _cast_list(value: object) -> List[bool]:
     return [bool(item) for item in value]
 
 
-def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric], str]:
-    ensure_commands_exist(["docker"])
+def _to_float(value: object) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
 
 
-    aider_repo_dir = Path(ctx.args.aider_repo_dir).expanduser().resolve()
+def _validate_aider_setup(aider_repo_dir: Path) -> None:
     if not aider_repo_dir.is_dir():
         raise BenchmarkError(f"Aider repo directory not found: {aider_repo_dir}")
 
@@ -151,15 +116,22 @@ def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric
             f"Clone {exercises_dir} under tmp.benchmarks first."
         )
 
+def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric], str]:
+    ensure_commands_exist(["docker"])
+
+    aider_repo_dir = Path(ctx.args.aider_repo_dir).expanduser().resolve()
+    _validate_aider_setup(aider_repo_dir)
+
     rundir_prefix = dt.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    rundir_name = f"{rundir_prefix}-run"
+    rundir_path = aider_repo_dir / "tmp.benchmarks" / rundir_name
 
     suite_dir = ctx.model_raw_dir / "aider"
     suite_dir.mkdir(parents=True, exist_ok=True)
-    benchmark_root_host_dir = suite_dir / "bench"
-    benchmark_root_host_dir.mkdir(parents=True, exist_ok=True)
-    run_dir_name = f"{ctx.ts_slug}--{ctx.model_slug}--aider"
-    run_dir_container = Path("/benchmarks") / run_dir_name
-    run_dir_host = benchmark_root_host_dir / run_dir_name
+
+    # This might be needed if we want to collect stats
+    # benchmark_root_host_dir = suite_dir / "bench"
+    # benchmark_root_host_dir.mkdir(parents=True, exist_ok=True)
 
     # aider_model_id = _resolve_aider_model_id(ctx)
     num_tests = -1 if full_mode else int(ctx.args.aider_limit)
@@ -192,17 +164,15 @@ def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric
 
     # Command to run inside the container
     cmd.extend([
-        "python",
+        "python3",
         "/aider/benchmark/benchmark.py",
-        f"{rundir_prefix}-run", # run directory name
+        rundir_name, # run directory name
         "--model",
         f"openai/{ctx.model_slug}", # try instead of model id (aider does not have many supported OOB)
         "--edit-format",
         "whole",
         "--threads",
         "1",
-        # "--tries",
-        # "2",
         "--num-tests",
         str(num_tests),
         "--exercises-dir",
@@ -223,9 +193,8 @@ def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric
     if proc.returncode != 0:
         raise BenchmarkError(f"Aider benchmark failed (see {stderr_path})")
 
-    metrics = _summarize_aider_results(run_dir_host)
-    primary_name = "pass_rate"
-    primary_value = f"{metrics[primary_name]:.6f}"
+    metrics = _summarize_aider_results(rundir_path)
+
     metric_rows = [
         Metric(
             timestamp=ctx.ts_slug,
@@ -241,4 +210,7 @@ def run_aider(ctx: ModelContext, full_mode: bool) -> Tuple[str, str, List[Metric
         )
         for metric_name, metric_value in sorted(metrics.items())
     ]
+
+    primary_name = "pass_rate"
+    primary_value = f"{metrics[primary_name]:.6f}"
     return primary_name, primary_value, metric_rows, f"{runtime_s:.3f}"
