@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -100,13 +101,43 @@ class LlamaCppNativeMultipleChoiceLM(LM):
         return token, typed_top_logprobs
 
     @staticmethod
-    def _match_token(
-        continuation: str, top_logprobs: Iterable[Dict[str, object]]
-    ) -> Optional[Dict[str, object]]:
-        for entry in top_logprobs:
-            if entry.get("token") == continuation:
-                return entry
-        return None
+    def _score_continuation(
+        continuation: str, top_logprobs: List[Dict[str, object]]
+    ) -> Tuple[float, bool, str]:
+        """Return ``(logprob, is_exact_match, method)`` for *continuation*.
+
+        Strategy (in order):
+        1. Exact token match – ideal case.
+        2. Prefix aggregation – sum (in log-space) the probability mass of all
+           tokens whose text begins with *continuation*.  Handles tokenisers
+           (e.g. Qwen BPE) that decompose single-letter answers into compound
+           tokens such as ' AC', ' Correct', etc.
+        3. Floor fallback – when neither strategy finds anything, return a very
+           negative logprob so that the run completes rather than crashing.
+           The affected sample will be scored as if the model strongly disfavours
+           this choice, which may underestimate accuracy but avoids a hard stop.
+        """
+        numeric_logprobs: List[Tuple[str, float]] = [
+            (str(e.get("token", "")), float(e["logprob"]))
+            for e in top_logprobs
+            if isinstance(e.get("logprob"), (int, float))
+        ]
+
+        # 1. Exact match
+        for token_text, lp in numeric_logprobs:
+            if token_text == continuation:
+                return lp, True, "exact"
+
+        # 2. Prefix aggregation
+        prefix_lps = [lp for token_text, lp in numeric_logprobs if token_text.startswith(continuation)]
+        if prefix_lps:
+            max_lp = max(prefix_lps)
+            agg_lp = max_lp + math.log(sum(math.exp(lp - max_lp) for lp in prefix_lps))
+            return agg_lp, False, "prefix_agg"
+
+        # 3. Floor fallback
+        floor = min((lp for _, lp in numeric_logprobs), default=-100.0) - 10.0
+        return floor, False, "floor_fallback"
 
     def loglikelihood(
         self, requests: List[Any], disable_tqdm: bool = False
@@ -136,20 +167,20 @@ class LlamaCppNativeMultipleChoiceLM(LM):
                 cache[context] = self._extract_top_logprobs(response)
 
             greedy_token, top_logprobs = cache[context]
-            matched = self._match_token(continuation, top_logprobs)
-            if matched is None:
+            logprob, is_exact, method = self._score_continuation(continuation, top_logprobs)
+
+            if method != "exact":
                 available = ", ".join(
-                    repr(entry.get("token")) for entry in top_logprobs[: min(10, len(top_logprobs))]
+                    repr(e.get("token")) for e in top_logprobs[: min(10, len(top_logprobs))]
                 )
-                raise RuntimeError(
-                    f"continuation {continuation!r} not present in native top_logprobs; "
-                    f"increase n_probs or use a different backend. Available: {available}"
+                logger.warning(
+                    "continuation %r not found as exact token (method=%s, logprob=%.3f). "
+                    "Top tokens: %s",
+                    continuation, method, logprob, available,
                 )
 
-            logprob = matched.get("logprob")
-            if not isinstance(logprob, (int, float)):
-                raise RuntimeError(f"missing numeric logprob for continuation {continuation!r}")
-            results.append((float(logprob), greedy_token == continuation))
+            is_greedy = is_exact and (greedy_token == continuation)
+            results.append((logprob, is_greedy))
 
         return results
 

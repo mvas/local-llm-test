@@ -77,7 +77,7 @@ config_fast = {
         "shots": 5,
         # "context": 8192, # can be 4096
         "model_args": [
-            "n_probs=20",
+            "n_probs=100",
         ]
     },
     "ifeval": {
@@ -123,7 +123,7 @@ config_full = {
         "limit": 10, # TODO:TEMPORARY!!,
         "shots": 5,
         "model_args": [
-            f"n_probs=40",
+            f"n_probs=100",
         ],
     },
     "ifeval": {
@@ -280,7 +280,7 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULTS["run_humaneval"],
         help="Run EvalPlus HumanEval+ subset if EvalPlus is installed.",
     )
-    parser.add_argument("--humaneval-limit", type=int, default=20)
+    parser.add_argument("--humaneval-limit", type=int, default=40)
     parser.add_argument(
         "--run-mbpp",
         action=argparse.BooleanOptionalAction,
