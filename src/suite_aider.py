@@ -158,6 +158,8 @@ def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int) -> Tupl
         f"OPENAI_API_BASE=http://host.docker.internal:{port}/v1",
         "-e",
         f"OPENAI_API_KEY=local-benchmark",
+        "-e",
+        "LITELLM_NUM_RETRIES=2",  # cap retries to avoid multi-minute hangs on permanent errors (e.g. context overflow)
         "aider-benchmark", # docker image name
     ]
 
