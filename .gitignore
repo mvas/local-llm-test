@@ -60,6 +60,9 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Local environment secrets (use .env.example as a template)
+.env
+
 
 
 results/
