@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from common import (
-    SUITE_TIMEOUT,
     BenchmarkError,
     Metric,
     ModelContext,
@@ -116,7 +115,7 @@ def _validate_aider_setup(aider_repo_dir: Path) -> None:
             f"Clone {exercises_dir} under tmp.benchmarks first."
         )
 
-def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int) -> Tuple[str, str, List[Metric], str]:
+def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout_s: int) -> Tuple[str, str, List[Metric], str]:
     ensure_commands_exist(["docker"])
 
     aider_repo_dir = Path("../aider").expanduser().resolve()
@@ -191,7 +190,7 @@ def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int) -> Tupl
         cmd=cmd,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
-        timeout_s=SUITE_TIMEOUT,
+        timeout_s=timeout_s,
         env=os.environ.copy(),
     )
     runtime_s = time.perf_counter() - started

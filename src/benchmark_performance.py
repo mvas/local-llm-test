@@ -50,6 +50,7 @@ DEFAULTS = {
     "run_lm_evals": False,
     "full_mode": False,
     "bfcl_timeout": 5400,
+    "aider_timeout": 5400,
 }
 
 config_fast = {
@@ -243,6 +244,7 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"full_mode={args.full_mode}",
         f"run_aider={args.run_aider}",
         f"aider_limit={args.aider_limit}",
+        f"aider_timeout={args.aider_timeout}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -317,6 +319,13 @@ def _parse_args() -> argparse.Namespace:
         help="Run Aider benchmark via aider-benchmark Docker image.",
     )
     parser.add_argument("--aider-limit", type=int, default=20)
+    parser.add_argument(
+        "--aider-timeout",
+        type=int,
+        default=DEFAULTS["aider_timeout"],
+        metavar="SECONDS",
+        help="Timeout in seconds for the Aider Docker benchmark. Defaults to 5400 (1.5h).",
+    )
     return parser.parse_args()
 
 
@@ -509,6 +518,7 @@ def _benchmark_model(
                     port=args.server_port,
                     full_mode=args.full_mode,
                     limit=args.aider_limit,
+                    timeout_s=args.aider_timeout,
                 ),
             )
             summary_values["aider_primary_metric"] = primary_value

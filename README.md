@@ -63,6 +63,7 @@ scripts/setup_aider_env.sh
 
 ### Notes:
 - `--full-mode` makes Aider run the full benchmark set (`--num-tests -1`).
+- `--aider-timeout` sets the timeout in seconds for the Docker benchmark run (default: 5400 / 1.5 hours). Increase for slow models or large test limits.
 
 ## Models
 
