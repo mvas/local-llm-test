@@ -7,7 +7,6 @@ import time
 from typing import Dict, List, Tuple
 
 from common import (
-    SUITE_TIMEOUT,
     BenchmarkError,
     Metric,
     ModelContext,
@@ -16,6 +15,9 @@ from common import (
 )
 from suite_common import run_logged_command
 
+
+EVALUATION_TIMEOUT = 600 # 10 minutes
+SUBSET_GENERATION_TIMEOUT = 600 # 10 minutes
 
 def _percent_or_float(value: str) -> float:
     text = value.strip()
@@ -90,7 +92,7 @@ print(f"Wrote subset IDs file: {output_path}")
         [str(bfcl_python), "-c", script, str(output_path), categories_csv, str(limit)],
         stdout_path=output_path.with_suffix(".stdout.log"),
         stderr_path=output_path.with_suffix(".stderr.log"),
-        timeout_s=SUITE_TIMEOUT,
+        timeout_s=SUBSET_GENERATION_TIMEOUT,
         env=os.environ.copy(),
     )
     if proc.returncode != 0:
@@ -148,7 +150,7 @@ def _parse_bfcl_metrics(score_dir: Path, bfcl_model_id: str) -> Dict[str, float]
     return metrics
 
 
-def run_bfcl(ctx: ModelContext, host:str, port: int, full_mode: bool, limit: int, map_file: str) -> Tuple[str, str, List[Metric], str]:
+def run_bfcl(ctx: ModelContext, host: str, port: int, full_mode: bool, limit: int, map_file: str, timeout_s: int) -> Tuple[str, str, List[Metric], str]:
     bfcl_env_path = Path(".venv-bfcl")
     bfcl_bin = bfcl_env_path / "bin" / "bfcl"
     bfcl_python = bfcl_env_path / "bin" / "python"
@@ -214,7 +216,7 @@ def run_bfcl(ctx: ModelContext, host:str, port: int, full_mode: bool, limit: int
         generate_cmd,
         stdout_path=generate_stdout,
         stderr_path=generate_stderr,
-        timeout_s=SUITE_TIMEOUT,
+        timeout_s=timeout_s,
         env=env,
     )
     if generate_proc.returncode != 0:
@@ -244,7 +246,7 @@ def run_bfcl(ctx: ModelContext, host:str, port: int, full_mode: bool, limit: int
         evaluate_cmd,
         stdout_path=evaluate_stdout,
         stderr_path=evaluate_stderr,
-        timeout_s=SUITE_TIMEOUT,
+        timeout_s=EVALUATION_TIMEOUT,
         env=env,
     )
     runtime_s = time.perf_counter() - started

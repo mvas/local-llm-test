@@ -49,6 +49,7 @@ DEFAULTS = {
     "run_aider": False,
     "run_lm_evals": False,
     "full_mode": False,
+    "bfcl_timeout": 5400,
 }
 
 config_fast = {
@@ -236,6 +237,7 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"run_mbpp={args.run_mbpp}",
         f"run_bfcl={args.run_bfcl}",
         f"bfcl_limit={args.bfcl_limit}",
+        f"bfcl_timeout={args.bfcl_timeout}",
         f"bfcl_model_id_map_file={args.bfcl_model_id_map_file}",
         f"run_lm_evals={args.run_lm_evals}",
         f"full_mode={args.full_mode}",
@@ -295,6 +297,13 @@ def _parse_args() -> argparse.Namespace:
         help="Run BFCL benchmark using the dedicated BFCL environment.",
     )
     parser.add_argument("--bfcl-limit", type=int, default=20)
+    parser.add_argument(
+        "--bfcl-timeout",
+        type=int,
+        default=DEFAULTS["bfcl_timeout"],
+        metavar="SECONDS",
+        help="Timeout in seconds for the BFCL generate step. Reasoning models may need more time.",
+    )
     parser.add_argument(
         "--bfcl-model-id-map-file",
         default="models/bfcl-model-ids.txt",
@@ -485,6 +494,7 @@ def _benchmark_model(
                     full_mode=args.full_mode,
                     limit=args.bfcl_limit,
                     map_file=args.bfcl_model_id_map_file,
+                    timeout_s=args.bfcl_timeout,
                 ),
             )
             summary_values["bfcl_primary_metric"] = primary_value
