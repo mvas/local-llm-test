@@ -122,6 +122,7 @@ def start_llama_server(
         str(ctx),
         "--reasoning",
         "off",
+        "--log-timestamps",
         "--host",
         host,
         "--port",
