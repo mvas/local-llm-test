@@ -52,6 +52,7 @@ DEFAULTS = {
     "full_mode": False,
     "bfcl_timeout": 5400,
     "aider_timeout": 5400,
+    "aider_litellm_timeout": 600,
 }
 
 config_fast = {
@@ -336,6 +337,14 @@ def _parse_args() -> argparse.Namespace:
         metavar="SECONDS",
         help="Timeout in seconds for the Aider Docker benchmark. Defaults to 5400 (1.5h).",
     )
+    parser.add_argument(
+        "--aider-litellm-timeout",
+        type=int,
+        default=DEFAULTS["aider_litellm_timeout"],
+        dest="aider_litellm_timeout",
+        metavar="SECONDS",
+        help="Per-request litellm timeout in seconds passed to the Aider container (LITELLM_REQUEST_TIMEOUT). Default: 600.",
+    )
     return parser.parse_args()
 
 
@@ -530,6 +539,7 @@ def _benchmark_model(
                     full_mode=args.full_mode,
                     limit=args.aider_limit,
                     timeout_s=args.aider_timeout,
+                    litellm_timeout_s=args.aider_litellm_timeout,
                 ),
             )
             summary_values["aider_primary_metric"] = primary_value

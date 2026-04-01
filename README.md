@@ -139,10 +139,24 @@ Reasoning/thinking models (e.g. DeepSeek-R1 distills) can produce extremely long
 | Larger distilled (32B–70B) | `32768` | More headroom for complex problems |
 | Frontier / non-reasoning | `-1` (default) | No cap needed; rely on `--aider-timeout` instead |
 
-Example:
+### `--aider-litellm-timeout` — per-request API timeout
+
+`LITELLM_REQUEST_TIMEOUT` controls how long the litellm HTTP client inside the Aider container waits for a single API response before giving up and retrying. When it fires, llama-server cancels the in-progress generation (within ~1 second of disconnect) and the same request is retried from scratch — wasting all tokens generated so far.
+
+`--aider-litellm-timeout N` sets this value in seconds (default: `600`). It should be large enough for a full capped generation to complete:
+
+```
+estimated_timeout ≈ n_predict ÷ tokens_per_second  (with some margin)
+```
+
+For example, with `--n-predict 16384` and a 14B model generating at ~35 tok/s: `16384 ÷ 35 ≈ 470s` → `600s` default provides sufficient margin.
+
+With `LITELLM_NUM_RETRIES=1` (hardcoded), worst-case time per exercise is `2 × timeout`. Increasing this value significantly without `--n-predict` is not recommended.
+
+**Example — small reasoning model:**
 
 ```bash
-uv run src/benchmark_performance.py models/models1.txt --run-aider --n-predict 16384
+uv run src/benchmark_performance.py models/models1.txt --run-aider --n-predict 16384 --aider-litellm-timeout 600
 ```
 
 ---

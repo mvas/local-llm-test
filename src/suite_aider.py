@@ -158,7 +158,7 @@ def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout
         "-e",
         f"OPENAI_API_KEY=local-benchmark",
         "-e",
-        "LITELLM_NUM_RETRIES=2",  # cap retries to avoid multi-minute hangs on permanent errors (e.g. context overflow)
+        "LITELLM_NUM_RETRIES=1",  # cap retries to avoid multi-minute hangs on permanent errors (e.g. context overflow)
         "-e",
         f"LITELLM_REQUEST_TIMEOUT={litellm_timeout_s}",
         "aider-benchmark", # docker image name
