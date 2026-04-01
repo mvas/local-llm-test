@@ -36,6 +36,7 @@ from suite_lm_eval import run_lm_eval_suite
 DEFAULTS = {
     "ngl": 99,
     "ctx": 8192,
+    "n_predict": -1,
     "temp": 0.0,
     "top_p": 1.0,
     "seed": 1234,
@@ -227,6 +228,7 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"models_count={len(resolved_models)}",
         f"ctx={args.ctx}",
         f"ngl={args.ngl}",
+        f"n_predict={args.n_predict}",
         f"default_temp={args.default_temp}",
         f"default_top_p={args.default_top_p}",
         f"default_seed={args.default_seed}",
@@ -266,6 +268,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir-base", default=DEFAULTS["out_dir_base"])
     parser.add_argument("--ngl", type=int, default=DEFAULTS["ngl"])
     parser.add_argument("--ctx", type=int, default=DEFAULTS["ctx"])
+    parser.add_argument(
+        "--n-predict",
+        type=int,
+        default=DEFAULTS["n_predict"],
+        dest="n_predict",
+        metavar="N",
+        help="Max tokens to generate per request (-1 = unlimited). Useful for capping reasoning model output.",
+    )
     parser.add_argument("--default-temp", type=float, default=DEFAULTS["temp"])
     parser.add_argument("--default-top-p", type=float, default=DEFAULTS["top_p"])
     parser.add_argument("--default-seed", type=int, default=DEFAULTS["seed"])
@@ -449,7 +459,8 @@ def _benchmark_model(
         server_proc = start_llama_server(
             server_log, ctx.model_path, args.ngl, args.ctx,
             args.server_host, args.server_port, None,
-            args.default_temp, args.default_top_p, args.default_seed)
+            args.default_temp, args.default_top_p, args.default_seed,
+            args.n_predict)
 
         # Run LM-Eval suites
         if args.run_lm_evals:

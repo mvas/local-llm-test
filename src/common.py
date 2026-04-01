@@ -111,7 +111,8 @@ def start_llama_server(
     threads: Optional[int],
     temp: Optional[float],
     top_p: Optional[float],
-    seed: Optional[int]) -> subprocess.Popen[str]:
+    seed: Optional[int],
+    n_predict: int = -1) -> subprocess.Popen[str]:
     cmd = [
         LLAMA_SERVER_BIN,
         "-m",
@@ -136,6 +137,8 @@ def start_llama_server(
         cmd.extend(["--top-p", str(top_p)])
     if seed is not None:
         cmd.extend(["--seed", str(seed)])
+    if n_predict != -1:
+        cmd.extend(["--n-predict", str(n_predict)])
 
     with server_log.open("w", encoding="utf-8") as log_handle:
         proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, text=True)

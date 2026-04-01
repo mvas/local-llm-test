@@ -123,6 +123,30 @@ uv run src/benchmark_performance.py models/models1.txt --run-aider --full-mode
 
 ---
 
+## Tuning
+
+### `--n-predict` — capping generation length
+
+Reasoning/thinking models (e.g. DeepSeek-R1 distills) can produce extremely long chain-of-thought outputs — tens of thousands of tokens per exercise — which causes requests to time out before generation finishes, leading to silent hangs rather than failed tests.
+
+`--n-predict N` sets a hard server-side cap on tokens generated per request (`-1` = unlimited, the default).
+
+**Recommended values:**
+
+| Model size | Suggested value | Notes |
+|---|---|---|
+| Small distilled (7B–14B) | `16384` | Covers most exercises; hard ones get truncated and fail quickly |
+| Larger distilled (32B–70B) | `32768` | More headroom for complex problems |
+| Frontier / non-reasoning | `-1` (default) | No cap needed; rely on `--aider-timeout` instead |
+
+Example:
+
+```bash
+uv run src/benchmark_performance.py models/models1.txt --run-aider --n-predict 16384
+```
+
+---
+
 ### Speed benchmarks
 
 ```bash
