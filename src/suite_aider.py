@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import threading
 import time
 import datetime as dt
 from pathlib import Path
@@ -99,6 +101,32 @@ def _to_float(value: object) -> float:
         return 0.0
 
 
+_PROGRESS_RE = re.compile(r"^fnames:\s+.*?/practice/([^/]+)/")
+_SECONDS_RE = re.compile(r"^\s*seconds_per_case:\s+([\d.]+)")
+
+
+def _monitor_progress(stdout_path: Path, stop_event: threading.Event, poll_s: float = 15.0) -> None:
+    """Periodically scan the aider stdout log and print exercise-level progress."""
+    last_pos = 0
+    exercises_seen = 0
+    while not stop_event.wait(timeout=poll_s):
+        try:
+            with stdout_path.open("r", encoding="utf-8", errors="replace") as f:
+                f.seek(last_pos)
+                new_text = f.read()
+                last_pos = f.tell()
+        except FileNotFoundError:
+            continue
+        for line in new_text.splitlines():
+            m = _PROGRESS_RE.match(line)
+            if m:
+                exercises_seen += 1
+                print(f"    [aider] exercise {exercises_seen}: {m.group(1)}", flush=True)
+            m2 = _SECONDS_RE.match(line)
+            if m2:
+                print(f"    [aider] avg {float(m2.group(1)):.0f}s/case so far", flush=True)
+
+
 def _validate_aider_setup(aider_repo_dir: Path) -> None:
     if not aider_repo_dir.is_dir():
         raise BenchmarkError(f"Aider repo directory not found: {aider_repo_dir}")
@@ -187,14 +215,23 @@ def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout
 
     stdout_path = suite_dir / "run.stdout.log"
     stderr_path = suite_dir / "run.stderr.log"
-    started = time.perf_counter()
-    proc = run_logged_command(
-        cmd=cmd,
-        stdout_path=stdout_path,
-        stderr_path=stderr_path,
-        timeout_s=timeout_s,
-        env=os.environ.copy(),
+    stop_event = threading.Event()
+    monitor = threading.Thread(
+        target=_monitor_progress, args=(stdout_path, stop_event), daemon=True,
     )
+    monitor.start()
+    started = time.perf_counter()
+    try:
+        proc = run_logged_command(
+            cmd=cmd,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            timeout_s=timeout_s,
+            env=os.environ.copy(),
+        )
+    finally:
+        stop_event.set()
+        monitor.join(timeout=2)
     runtime_s = time.perf_counter() - started
     if proc.returncode != 0:
         raise BenchmarkError(f"Aider benchmark failed (see {stderr_path})")

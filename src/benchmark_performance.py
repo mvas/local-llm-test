@@ -52,7 +52,9 @@ DEFAULTS = {
     "full_mode": False,
     "bfcl_timeout": 5400,
     "aider_timeout": 5400,
-    "aider_litellm_timeout": 600,
+    "aider_litellm_timeout": 300,
+    "reasoning_budget": None,
+    "reasoning": None,
 }
 
 config_fast = {
@@ -248,6 +250,8 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"run_aider={args.run_aider}",
         f"aider_limit={args.aider_limit}",
         f"aider_timeout={args.aider_timeout}",
+        f"reasoning_budget={args.reasoning_budget}",
+        f"reasoning={args.reasoning}",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -343,7 +347,24 @@ def _parse_args() -> argparse.Namespace:
         default=DEFAULTS["aider_litellm_timeout"],
         dest="aider_litellm_timeout",
         metavar="SECONDS",
-        help="Per-request litellm timeout in seconds passed to the Aider container (LITELLM_REQUEST_TIMEOUT). Default: 600.",
+        help="Per-request litellm timeout in seconds passed to the Aider container (LITELLM_REQUEST_TIMEOUT). Default: 300.",
+    )
+    parser.add_argument(
+        "--reasoning-budget",
+        type=int,
+        default=DEFAULTS["reasoning_budget"],
+        dest="reasoning_budget",
+        metavar="TOKENS",
+        help="Token budget for model thinking/reasoning: -1 = unrestricted, 0 = disable thinking, N>0 = cap at N tokens. "
+             "Essential for reasoning models (Qwen3.5, DeepSeek-R1, etc.) to prevent unbounded thinking chains.",
+    )
+    parser.add_argument(
+        "--reasoning",
+        type=str,
+        default=DEFAULTS["reasoning"],
+        choices=["on", "off", "auto"],
+        help="Enable/disable reasoning/thinking in chat: 'on', 'off', or 'auto' (detect from template). "
+             "Set to 'off' to completely disable thinking for reasoning models.",
     )
     return parser.parse_args()
 
@@ -469,7 +490,7 @@ def _benchmark_model(
             server_log, ctx.model_path, args.ngl, args.ctx,
             args.server_host, args.server_port, None,
             args.default_temp, args.default_top_p, args.default_seed,
-            args.n_predict)
+            args.n_predict, args.reasoning_budget, args.reasoning)
 
         # Run LM-Eval suites
         if args.run_lm_evals:

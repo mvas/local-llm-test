@@ -102,6 +102,8 @@ uv run src/benchmark_performance.py <models_file> [options]
 | `--full-mode` | off | Remove per-suite sample limits for LM eval and run full set of tests for BFCL and Aider |
 | `--server-port` | `8082` | llama-server port |
 | `--out-dir-base` | `results/performance` | Output directory root |
+| `--reasoning-budget` | — | Token budget for thinking (see [Reasoning models](#reasoning-models)) |
+| `--reasoning` | `auto` | Enable/disable thinking: `on`, `off`, `auto` |
 
 Results are written to `results/performance/<timestamp>/` as `summary.csv`, `suite_runs.csv`, and `metrics.csv`.
 
@@ -125,38 +127,65 @@ uv run src/benchmark_performance.py models/models1.txt --run-aider --full-mode
 
 ## Tuning
 
-### `--n-predict` — capping generation length
+### Reasoning models
 
-Reasoning/thinking models (e.g. DeepSeek-R1 distills) can produce extremely long chain-of-thought outputs — tens of thousands of tokens per exercise — which causes requests to time out before generation finishes, leading to silent hangs rather than failed tests.
+Thinking/reasoning models (Qwen3.5, DeepSeek-R1, QwQ, etc.) generate hidden chain-of-thought tokens before producing visible output. On local inference this can mean 10,000–20,000+ thinking tokens per request, making benchmarks orders of magnitude slower and often causing them to appear stuck.
 
-`--n-predict N` sets a hard server-side cap on tokens generated per request (`-1` = unlimited, the default).
+**`--reasoning-budget`** is the recommended first lever. It caps thinking tokens at the server level while preserving the model's ability to reason:
+
+| Flag | Effect |
+|---|---|
+| `--reasoning-budget 4096` | Allow up to 4096 thinking tokens per response (recommended for 7B–14B) |
+| `--reasoning-budget 0` | Suppress thinking entirely (thinking tag immediately closed) |
+| (not set, default) | Unrestricted — model decides how much to think |
+
+**`--reasoning off`** completely disables the thinking chat-template path. Useful when the model's thinking mode is causing format issues or when you want pure non-reasoning behavior.
+
+**Example — 9B reasoning model on Aider:**
+
+```bash
+uv run src/benchmark_performance.py models/models1.txt \
+  --run-aider --ctx 32768 \
+  --reasoning-budget 4096 \
+  --n-predict 8192 \
+  --aider-litellm-timeout 300
+```
+
+### `--n-predict` — capping total generation length
+
+`--n-predict N` sets a hard server-side cap on **all** tokens generated per request, including both thinking and visible output (`-1` = unlimited, the default). This is a broader alternative to `--reasoning-budget` that also limits non-thinking output.
 
 **Recommended values:**
 
-| Model size | Suggested value | Notes |
+| Model type | Suggested value | Notes |
 |---|---|---|
-| Small distilled (7B–14B) | `16384` | Covers most exercises; hard ones get truncated and fail quickly |
-| Larger distilled (32B–70B) | `32768` | More headroom for complex problems |
-| Frontier / non-reasoning | `-1` (default) | No cap needed; rely on `--aider-timeout` instead |
+| Reasoning (7B–14B) | `8192`–`16384` | Use alongside or instead of `--reasoning-budget` |
+| Reasoning (32B–70B) | `16384`–`32768` | More headroom for complex problems |
+| Non-reasoning | `-1` (default) | No cap needed; rely on `--aider-timeout` instead |
 
 ### `--aider-litellm-timeout` — per-request API timeout
 
-`LITELLM_REQUEST_TIMEOUT` controls how long the litellm HTTP client inside the Aider container waits for a single API response before giving up and retrying. When it fires, llama-server cancels the in-progress generation (within ~1 second of disconnect) and the same request is retried from scratch — wasting all tokens generated so far.
+`LITELLM_REQUEST_TIMEOUT` controls how long the litellm HTTP client inside the Aider container waits for a single API response before giving up. When it fires, llama-server cancels the in-progress generation and the same request is retried from scratch.
 
-`--aider-litellm-timeout N` sets this value in seconds (default: `600`). It should be large enough for a full capped generation to complete:
+`--aider-litellm-timeout N` sets this value in seconds (default: `300`). It should be large enough for a full capped generation to complete:
 
 ```
-estimated_timeout ≈ n_predict ÷ tokens_per_second  (with some margin)
+estimated_timeout ≈ max_tokens ÷ tokens_per_second  (with some margin)
 ```
 
-For example, with `--n-predict 16384` and a 14B model generating at ~35 tok/s: `16384 ÷ 35 ≈ 470s` → `600s` default provides sufficient margin.
+For example, with `--n-predict 8192` on a 9B model at ~30 tok/s: `8192 ÷ 30 ≈ 273s` → `300s` default provides sufficient margin.
 
-With `LITELLM_NUM_RETRIES=1` (hardcoded), worst-case time per exercise is `2 × timeout`. Increasing this value significantly without `--n-predict` is not recommended.
+With `LITELLM_NUM_RETRIES=1` (hardcoded), worst-case time per exercise is `2 × timeout`. Setting a very high timeout without `--reasoning-budget` or `--n-predict` is not recommended.
 
-**Example — small reasoning model:**
+**Example — small reasoning model, fully tuned:**
 
 ```bash
-uv run src/benchmark_performance.py models/models1.txt --run-aider --n-predict 16384 --aider-litellm-timeout 600
+uv run src/benchmark_performance.py models/models1.txt \
+  --run-aider \
+  --ctx 32768 \
+  --reasoning-budget 4096 \
+  --n-predict 8192 \
+  --aider-litellm-timeout 300
 ```
 
 ---

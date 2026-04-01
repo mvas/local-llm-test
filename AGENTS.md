@@ -73,6 +73,9 @@ HumanEval benchmarks:
 
 `sh benchmark-perf.sh models/models1.txt -t models/tokenizers.txt --run-mbpp --mbpp-limit 5`
 
+Aider benchmark (reasoning model):
+`sh benchmark-perf.sh models/models1.txt --run-aider --ctx 32768 --reasoning-budget 4096 --n-predict 8192 --aider-litellm-timeout 300`
+
 BFCL benchmark:
 `sh benchmark-perf.sh models/models1.txt --run-bfcl --bfcl-limit 2 --bfcl-model-id-map-file models/bfcl-model-ids.txt`
 

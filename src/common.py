@@ -112,7 +112,10 @@ def start_llama_server(
     temp: Optional[float],
     top_p: Optional[float],
     seed: Optional[int],
-    n_predict: int = -1) -> subprocess.Popen[str]:
+    n_predict: int = -1,
+    reasoning_budget: Optional[int] = None,
+    reasoning: Optional[str] = None,
+) -> subprocess.Popen[str]:
     cmd = [
         LLAMA_SERVER_BIN,
         "-m",
@@ -137,6 +140,10 @@ def start_llama_server(
         cmd.extend(["--seed", str(seed)])
     if n_predict != -1:
         cmd.extend(["--n-predict", str(n_predict)])
+    if reasoning_budget is not None:
+        cmd.extend(["--reasoning-budget", str(reasoning_budget)])
+    if reasoning is not None:
+        cmd.extend(["--reasoning", reasoning])
 
     with server_log.open("w", encoding="utf-8") as log_handle:
         proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT, text=True)
