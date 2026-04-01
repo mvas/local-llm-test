@@ -115,7 +115,7 @@ def _validate_aider_setup(aider_repo_dir: Path) -> None:
             f"Clone {exercises_dir} under tmp.benchmarks first."
         )
 
-def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout_s: int) -> Tuple[str, str, List[Metric], str]:
+def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout_s: int, litellm_timeout_s: int = 600) -> Tuple[str, str, List[Metric], str]:
     ensure_commands_exist(["docker"])
 
     aider_repo_dir = Path("../aider").expanduser().resolve()
@@ -159,6 +159,8 @@ def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout
         f"OPENAI_API_KEY=local-benchmark",
         "-e",
         "LITELLM_NUM_RETRIES=2",  # cap retries to avoid multi-minute hangs on permanent errors (e.g. context overflow)
+        "-e",
+        f"LITELLM_REQUEST_TIMEOUT={litellm_timeout_s}",
         "aider-benchmark", # docker image name
     ]
 
