@@ -5,6 +5,7 @@ This file documents the local Aider patch made while debugging benchmark runs ag
 The goals were:
 
 - prevent a trailing background summarization thread from outliving a benchmark exercise
+- raise the benchmark path's minimum chat-history budget for local models that otherwise default too low
 - preserve enough detail to reproduce the patch later or turn it into an upstream PR
 
 ## Problem Summary
@@ -88,12 +89,66 @@ This patch is aimed at the most plausible failure mode:
 - but the benchmark exercise could return without an obvious final join
 - that leaves room for a trailing summarization attempt to survive into teardown
 
+## Change: Raise Benchmark Minimum Chat History Tokens
+
+File changed:
+
+- `benchmark/benchmark.py`
+
+Change made:
+
+- added a benchmark-local constant:
+  - `MIN_CHAT_HISTORY_TOKENS = 4096`
+- after constructing `main_model`, clamp:
+  - `main_model.max_chat_history_tokens = max(main_model.max_chat_history_tokens, MIN_CHAT_HISTORY_TOKENS)`
+
+Intent:
+
+- keep benchmark chat-history summarization from starting too aggressively for local models with missing or weak metadata
+- avoid the benchmark path inheriting Aider's default floor of `1024` when the real serving context is substantially larger
+
+Why this location:
+
+- the benchmark CLI does not expose Aider's regular `--max-chat-history-tokens` option
+- `run_test_real()` is where the benchmark creates the `Model` used for each exercise
+- changing `main_model.max_chat_history_tokens` there affects the default `ChatSummary` created by `Coder`
+
+Patch sketch:
+
+```diff
+--- a/benchmark/benchmark.py
++++ b/benchmark/benchmark.py
+@@
++MIN_CHAT_HISTORY_TOKENS = 4096
+@@
+     main_model = models.Model(...)
++    main_model.max_chat_history_tokens = max(
++        main_model.max_chat_history_tokens,
++        MIN_CHAT_HISTORY_TOKENS,
++    )
+```
+
+Minimal conceptual change:
+
+- keep benchmark CLI behavior unchanged externally
+- raise only the benchmark path's minimum summarization threshold
+- leave models with larger native values unchanged
+
+Why this change was chosen:
+
+- the benchmark was using model names like `openai/<gguf-slug>` that may not have precise model metadata
+- in those cases, Aider could fall back to `1024` chat-history tokens
+- a `4096` floor is a safer local default for the larger-context GGUF models being benchmarked here
+
 ## Reproduce From Scratch
 
 If rebuilding this setup later, re-apply:
 
 1. In `aider/benchmark/benchmark.py`
    - ensure `run_test_real()` always calls `coder.summarize_end()` in a `finally` block before returning
+2. In `aider/benchmark/benchmark.py`
+   - define `MIN_CHAT_HISTORY_TOKENS = 4096`
+   - after `main_model = models.Model(...)`, set `main_model.max_chat_history_tokens = max(main_model.max_chat_history_tokens, MIN_CHAT_HISTORY_TOKENS)`
 
 ## Suggested Validation
 
@@ -101,6 +156,7 @@ After reapplying the patches, run a short Aider benchmark and check:
 
 - the end of `aider/run.stdout.log` no longer shows the summarization failure
 - the outer benchmark no longer marks the run failed due to a timeout that happens after benchmark results were already printed
+- `main_model.max_chat_history_tokens` in `aider/run.stdout.log` is at least `4096` for local GGUF-backed benchmark models that previously resolved to `1024`
 
 ## Notes For A Possible Aider PR
 

@@ -104,9 +104,6 @@ def _to_float(value: object) -> float:
 _PROGRESS_RE = re.compile(r"^fnames:\s+.*?/practice/([^/]+)/")
 _SECONDS_RE = re.compile(r"^\s*seconds_per_case:\s+([\d.]+)")
 
-# Aider has it 1024 which might be too low for some models
-AIDER_MAX_CHAT_HISTORY_TOKENS = 4096
-
 
 def _monitor_progress(stdout_path: Path, stop_event: threading.Event, poll_s: float = 15.0) -> None:
     """Periodically scan the aider stdout log and print exercise-level progress."""
@@ -204,8 +201,6 @@ def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout
         f"openai/{ctx.model_slug}", # try instead of model id (aider does not have many supported OOB)
         "--edit-format",
         "whole",
-        "--max-chat-history-tokens",
-        str(AIDER_MAX_CHAT_HISTORY_TOKENS),
         "--threads",
         "1",
         "--num-tests",
