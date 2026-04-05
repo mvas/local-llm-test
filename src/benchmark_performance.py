@@ -53,6 +53,7 @@ DEFAULTS = {
     "bfcl_timeout": 5400,
     "aider_timeout": 5400,
     "aider_litellm_timeout": 300,
+    "aider_mode": "whole",
     "reasoning_budget": None,
     "reasoning": None,
 }
@@ -250,6 +251,7 @@ def _write_meta(path: Path, args: argparse.Namespace, resolved_models: List[str]
         f"run_aider={args.run_aider}",
         f"aider_limit={args.aider_limit}",
         f"aider_timeout={args.aider_timeout}",
+        f"aider_mode={args.aider_mode}",
         f"reasoning_budget={args.reasoning_budget}",
         f"reasoning={args.reasoning}",
     ]
@@ -348,6 +350,13 @@ def _parse_args() -> argparse.Namespace:
         dest="aider_litellm_timeout",
         metavar="SECONDS",
         help="Per-request litellm timeout in seconds passed to the Aider container (LITELLM_REQUEST_TIMEOUT). Default: 300.",
+    )
+    parser.add_argument(
+        "--aider-mode",
+        choices=["whole", "diff", "udiff"],
+        default=DEFAULTS["aider_mode"],
+        dest="aider_mode",
+        help="Aider benchmark edit format (--edit-format): whole, diff, or udiff.",
     )
     parser.add_argument(
         "--reasoning-budget",
@@ -561,6 +570,7 @@ def _benchmark_model(
                     limit=args.aider_limit,
                     timeout_s=args.aider_timeout,
                     litellm_timeout_s=args.aider_litellm_timeout,
+                    aider_mode=args.aider_mode,
                 ),
             )
             summary_values["aider_primary_metric"] = primary_value

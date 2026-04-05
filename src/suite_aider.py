@@ -143,7 +143,15 @@ def _validate_aider_setup(aider_repo_dir: Path) -> None:
             f"Clone {exercises_dir} under tmp.benchmarks first."
         )
 
-def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout_s: int, litellm_timeout_s: int = 600) -> Tuple[str, str, List[Metric], str]:
+def run_aider(
+    ctx: ModelContext,
+    port: int,
+    full_mode: bool,
+    limit: int,
+    timeout_s: int,
+    litellm_timeout_s: int = 600,
+    aider_mode: str = "whole",
+) -> Tuple[str, str, List[Metric], str]:
     ensure_commands_exist(["docker"])
 
     aider_repo_dir = Path("../aider").expanduser().resolve()
@@ -200,7 +208,7 @@ def run_aider(ctx: ModelContext, port: int, full_mode: bool, limit: int, timeout
         "--model",
         f"openai/{ctx.model_slug}", # try instead of model id (aider does not have many supported OOB)
         "--edit-format",
-        "whole",
+        aider_mode,
         "--threads",
         "1",
         "--num-tests",
