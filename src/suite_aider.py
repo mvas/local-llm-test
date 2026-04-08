@@ -5,7 +5,7 @@ import threading
 import time
 import datetime as dt
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from common import (
     BenchmarkError,
@@ -151,6 +151,7 @@ def run_aider(
     timeout_s: int,
     litellm_timeout_s: int = 600,
     aider_mode: str = "whole",
+    test_seed: Optional[int] = None,
 ) -> Tuple[str, str, List[Metric], str]:
     ensure_commands_exist(["docker"])
 
@@ -220,6 +221,9 @@ def run_aider(
     if not full_mode:
         cmd.append("--languages")
         cmd.append("python")
+
+    if test_seed is not None:
+        cmd.extend(["--test-seed", str(test_seed)])
 
     stdout_path = suite_dir / "run.stdout.log"
     stderr_path = suite_dir / "run.stderr.log"

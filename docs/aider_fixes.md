@@ -179,3 +179,22 @@ This change was applied locally only:
 - `benchmark/benchmark.py`
 
 It is not assumed to exist in a fresh checkout unless re-applied.
+
+## Change: Deterministic exercise order (`--test-seed`)
+
+**Problem:** Aider `benchmark.py` builds a sorted list of exercise paths, then calls `random.shuffle` before slicing to `--num-tests`. With no seed, limited runs (`--aider-limit` / `--num-tests N`) get a **different subset and order every run**.
+
+**Change (in `benchmark/benchmark.py`):**
+
+- Added optional CLI flag `--test-seed N`.
+- If `--test-seed` is set: `random.Random(N).shuffle(test_dnames)` (reproducible).
+- If omitted: `random.shuffle(test_dnames)` (previous behavior).
+
+**Integration in `local-llm`:**
+
+- `benchmark_performance.py` exposes `--aider-test-seed`; when set, `suite_aider.py` appends `--test-seed` to the container command.
+- `run-meta.txt` records `aider_test_seed=<N>` when the flag is set (empty when omitted).
+
+**Docs:** See [README.md](../README.md) (Aider notes and tuning section).
+
+**Suggested validation:** Run twice with the same `--aider-limit`, `--aider-test-seed`, and model config; compare exercise order lines in `raw/<model>/aider/run.stdout.log` (should match).
