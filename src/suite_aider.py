@@ -22,13 +22,22 @@ def _summarize_aider_results(run_dir: Path) -> Dict[str, float]:
         raise BenchmarkError(f"could not find Aider result files under {run_dir}")
 
     rows: List[Dict[str, object]] = []
+    malformed_results = 0
     for result_file in result_files:
         try:
             payload = json.loads(result_file.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
+            malformed_results += 1
             continue
         if isinstance(payload, dict):
             rows.append(payload)
+        else:
+            malformed_results += 1
+
+    if malformed_results:
+        raise BenchmarkError(
+            f"could not parse {malformed_results} Aider result files under {run_dir}"
+        )
 
     if not rows:
         raise BenchmarkError(f"could not parse Aider result files under {run_dir}")
