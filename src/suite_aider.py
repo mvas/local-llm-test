@@ -136,6 +136,15 @@ def _monitor_progress(stdout_path: Path, stop_event: threading.Event, poll_s: fl
                 print(f"    [aider] avg {float(m2.group(1)):.0f}s/case so far", flush=True)
 
 
+def default_aider_repo_dir() -> Path:
+    return Path("../aider").expanduser().resolve()
+
+
+def validate_aider_setup(aider_repo_dir: Path | None = None) -> None:
+    ensure_commands_exist(["docker"])
+    _validate_aider_setup(aider_repo_dir or default_aider_repo_dir())
+
+
 def _validate_aider_setup(aider_repo_dir: Path) -> None:
     if not aider_repo_dir.is_dir():
         raise BenchmarkError(f"Aider repo directory not found: {aider_repo_dir}")
@@ -164,7 +173,7 @@ def run_aider(
 ) -> Tuple[str, str, List[Metric], str]:
     ensure_commands_exist(["docker"])
 
-    aider_repo_dir = Path("../aider").expanduser().resolve()
+    aider_repo_dir = default_aider_repo_dir()
     _validate_aider_setup(aider_repo_dir)
 
     rundir_prefix = dt.datetime.now().strftime("%Y-%m-%d-%H%M%S")

@@ -16,6 +16,10 @@ from common import (
 from suite_common import run_logged_command
 
 
+BFCL_ENV_PATH = Path(".venv-bfcl")
+BFCL_BIN = BFCL_ENV_PATH / "bin" / "bfcl"
+BFCL_PYTHON = BFCL_ENV_PATH / "bin" / "python"
+
 EVALUATION_TIMEOUT = 600 # 10 minutes
 SUBSET_GENERATION_TIMEOUT = 600 # 10 minutes
 
@@ -60,6 +64,23 @@ def _resolve_bfcl_model_id(ctx: ModelContext, map_file: str) -> str:
             f"(in {map_path})"
         )
     return bfcl_model_id
+
+
+def validate_bfcl_setup(map_file: str, model_paths: list[str]) -> None:
+    ensure_commands_exist([str(BFCL_BIN), str(BFCL_PYTHON)])
+
+    map_path = Path(map_file).expanduser()
+    if not map_path.is_file():
+        raise BenchmarkError(f"BFCL model id map file not found: {map_path}")
+
+    mapping = _read_bfcl_model_id_map_file(map_path)
+    missing = [model_path for model_path in model_paths if model_path not in mapping]
+    if missing:
+        preview = ", ".join(missing[:3])
+        suffix = "" if len(missing) <= 3 else f" and {len(missing) - 3} more"
+        raise BenchmarkError(
+            f"missing BFCL model id mapping for {len(missing)} model(s): {preview}{suffix}"
+        )
 
 
 def _write_subset_ids_file(
@@ -151,11 +172,8 @@ def _parse_bfcl_metrics(score_dir: Path, bfcl_model_id: str) -> Dict[str, float]
 
 
 def run_bfcl(ctx: ModelContext, host: str, port: int, full_mode: bool, limit: int, map_file: str, timeout_s: int) -> Tuple[str, str, List[Metric], str]:
-    bfcl_env_path = Path(".venv-bfcl")
-    bfcl_bin = bfcl_env_path / "bin" / "bfcl"
-    bfcl_python = bfcl_env_path / "bin" / "python"
     bfcl_model_id = _resolve_bfcl_model_id(ctx, map_file)
-    ensure_commands_exist([str(bfcl_bin), str(bfcl_python)])
+    ensure_commands_exist([str(BFCL_BIN), str(BFCL_PYTHON)])
 
     suite_dir = ctx.model_raw_dir / "bfcl"
     suite_dir.mkdir(parents=True, exist_ok=True)
@@ -182,7 +200,7 @@ def run_bfcl(ctx: ModelContext, host: str, port: int, full_mode: bool, limit: in
         run_ids = True
         subset_ids_path = suite_dir / "test_case_ids_to_generate.json"
         _write_subset_ids_file(
-            bfcl_python=bfcl_python,
+            bfcl_python=BFCL_PYTHON,
             output_path=subset_ids_path,
             categories_csv=categories_csv,
             limit=limit,
@@ -191,7 +209,7 @@ def run_bfcl(ctx: ModelContext, host: str, port: int, full_mode: bool, limit: in
     generate_stdout = suite_dir / "generate.stdout.log"
     generate_stderr = suite_dir / "generate.stderr.log"
     generate_cmd = [
-        str(bfcl_bin),
+        str(BFCL_BIN),
         "generate",
         "--model",
         bfcl_model_id,
@@ -225,7 +243,7 @@ def run_bfcl(ctx: ModelContext, host: str, port: int, full_mode: bool, limit: in
     evaluate_stdout = suite_dir / "evaluate.stdout.log"
     evaluate_stderr = suite_dir / "evaluate.stderr.log"
     evaluate_cmd = [
-        str(bfcl_bin),
+        str(BFCL_BIN),
         "evaluate",
         "--model",
         bfcl_model_id,

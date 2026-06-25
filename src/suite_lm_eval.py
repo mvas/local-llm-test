@@ -2,8 +2,12 @@ import json
 from pathlib import Path
 import time
 from typing import Dict, List, Tuple
-from common import SUITE_TIMEOUT, BenchmarkError, Metric, ModelContext
+from common import LM_EVAL_BIN, SUITE_TIMEOUT, BenchmarkError, Metric, ModelContext, ensure_commands_exist
 from suite_common import pick_primary_metric, run_logged_command
+
+
+def validate_lm_eval_setup() -> None:
+    ensure_commands_exist([LM_EVAL_BIN])
 
 
 def _flatten_numeric_metrics(prefix: str, value: object, out: Dict[str, float]) -> None:

@@ -27,10 +27,10 @@ from common import (
     Metric,
     ModelContext,
 )
-from suite_evalplus import run_humaneval, run_mbpp
-from suite_bfcl import run_bfcl
-from suite_aider import run_aider
-from suite_lm_eval import run_lm_eval_suite
+from suite_evalplus import run_humaneval, run_mbpp, validate_evalplus_setup
+from suite_bfcl import run_bfcl, validate_bfcl_setup
+from suite_aider import run_aider, validate_aider_setup
+from suite_lm_eval import run_lm_eval_suite, validate_lm_eval_setup
 
 
 DEFAULTS = {
@@ -624,12 +624,43 @@ def _benchmark_model(
 server_proc: Optional[subprocess.Popen[str]] = None
 
 
-def main() -> int:
-    ensure_commands_exist([LLAMA_SERVER_BIN, LM_EVAL_BIN])
+def _selected_suite_names(args: argparse.Namespace) -> list[str]:
+    suites: list[str] = []
+    if args.run_lm_evals:
+        suites.append("lm-eval")
+    if args.run_humaneval:
+        suites.append("humaneval")
+    if args.run_mbpp:
+        suites.append("mbpp")
+    if args.run_bfcl:
+        suites.append("bfcl")
+    if args.run_aider:
+        suites.append("aider")
+    return suites
 
+
+def _validate_selected_suites(args: argparse.Namespace, model_paths: list[str]) -> None:
+    if not _selected_suite_names(args):
+        raise BenchmarkError(
+            "no benchmark suites selected; pass at least one of "
+            "--run-lm-evals, --run-humaneval, --run-mbpp, --run-bfcl, --run-aider"
+        )
+
+    ensure_commands_exist([LLAMA_SERVER_BIN])
+
+    if args.run_lm_evals:
+        validate_lm_eval_setup()
+    if args.run_humaneval or args.run_mbpp:
+        validate_evalplus_setup()
+    if args.run_bfcl:
+        validate_bfcl_setup(args.bfcl_model_id_map_file, model_paths)
+    if args.run_aider:
+        validate_aider_setup()
+
+
+def main() -> int:
     args = _parse_args()
 
-    # Read models
     models_file = Path(args.models_file)
     if not models_file.is_file():
         raise BenchmarkError(f"models file not found: {models_file}")
@@ -637,7 +668,6 @@ def main() -> int:
     if not models:
         raise BenchmarkError(f"no model entries found in {models_file}")
 
-    # Read tokenizers
     tokenizer_map: Dict[str, str] = {}
     if args.tokenizer_map_file:
         print(f"Reading tokenizers from: {args.tokenizer_map_file}")
@@ -645,6 +675,8 @@ def main() -> int:
         if not tokenizer_path.is_file():
             raise BenchmarkError(f"tokenizer map file not found: {tokenizer_path}")
         tokenizer_map = _read_tokenizer_map_file(tokenizer_path)
+
+    _validate_selected_suites(args, models)
 
     # Create run folders and files
     ts_slug = timestamp_slug()

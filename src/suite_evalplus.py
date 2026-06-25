@@ -10,6 +10,13 @@ from common import EVALPLUS_EVALUATE_BIN, SUITE_TIMEOUT, BenchmarkError, Metric,
 from suite_common import pick_primary_metric, run_logged_command
 
 
+def validate_evalplus_setup() -> None:
+    ensure_commands_exist([EVALPLUS_EVALUATE_BIN])
+    try:
+        from evalplus.data import get_human_eval_plus, get_mbpp_plus  # noqa: F401
+    except ImportError as exc:
+        raise BenchmarkError("EvalPlus Python package is required") from exc
+
 
 def _create_humaneval_subset(limit: int, output_path: Path) -> None:
     try:
